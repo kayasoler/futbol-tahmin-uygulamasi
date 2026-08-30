@@ -1,18 +1,25 @@
 from __future__ import annotations
 
 import hmac
+from datetime import datetime, time
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
 from supabase import Client, create_client
 
 from data_import import (
+    FIXTURE_REQUIRED_COLUMNS,
     REQUIRED_COLUMNS,
     build_records,
+    build_upcoming_records,
     fetch_existing_match_keys,
+    fetch_existing_upcoming_match_keys,
     insert_new_records,
+    insert_upcoming_records,
     read_football_csv,
     validate_and_prepare,
+    validate_and_prepare_fixtures,
 )
 
 
@@ -41,7 +48,6 @@ st.markdown(
 
 @st.cache_resource
 def get_supabase_client() -> Client:
-    """Create one server-side Supabase client for the Streamlit session."""
     url = st.secrets["SUPABASE_URL"]
     service_key = st.secrets["SUPABASE_SERVICE_ROLE_KEY"]
     return create_client(url, service_key)
@@ -61,7 +67,6 @@ def stop_if_secrets_missing() -> None:
 
 
 def require_login() -> None:
-    """Protect the server-side data tools with a shared app password."""
     if st.session_state.get("authenticated") is True:
         return
 
@@ -78,81 +83,89 @@ def require_login() -> None:
     st.stop()
 
 
-def get_historical_count(client: Client) -> int:
-    response = (
-        client.table("historical_matches")
-        .select("id", count="exact")
-        .limit(1)
-        .execute()
-    )
+def get_table_count(client: Client, table_name: str) -> int:
+    response = client.table(table_name).select("id", count="exact").limit(1).execute()
     return int(response.count or 0)
 
 
-st.title("⚽ Futbol Tahmin ve Analiz")
-st.caption("Aşama 1 · Geçmiş maç verilerinin güvenli ve tekrarsız yüklenmesi")
+def fetch_team_catalog(client: Client) -> tuple[list[str], list[str]]:
+    teams: set[str] = set()
+    divisions: set[str] = set()
+    page_size = 1000
+    start = 0
 
-with st.sidebar:
-    st.subheader("Proje durumu")
-    st.success("Veritabanı tabloları hazır")
-    st.info("Şu anda: Geçmiş CSV yükleme")
-    st.caption("Tahmin ve canlı araştırma sonraki aşamalarda eklenecek.")
-
-    if st.session_state.get("authenticated") is True:
-        if st.button("Güvenli çıkış"):
-            st.session_state["authenticated"] = False
-            st.rerun()
-
-stop_if_secrets_missing()
-require_login()
-
-try:
-    supabase = get_supabase_client()
-    current_count = get_historical_count(supabase)
-except Exception as exc:
-    st.error("Supabase bağlantısı kurulamadı.")
-    st.code(str(exc))
-    st.stop()
-
-st.success("Supabase bağlantısı başarılı.")
-
-if "last_import_summary" in st.session_state:
-    summary = st.session_state.pop("last_import_summary")
-    st.success(
-        f"{summary['selected_files']} CSV dosyasından "
-        f"{summary['inserted']} yeni maç başarıyla eklendi."
-    )
-    if (
-        summary["file_duplicates"]
-        or summary["cross_file_duplicates"]
-        or summary["existing"]
-        or summary["race_duplicates"]
-    ):
-        st.info(
-            f"Atlanan tekrarlar — dosya içinde: {summary['file_duplicates']}, "
-            f"seçilen dosyalar arasında: {summary['cross_file_duplicates']}, "
-            f"veritabanında zaten bulunan: {summary['existing']}, "
-            f"eşzamanlı yakalanan: {summary['race_duplicates']}."
+    while True:
+        response = (
+            client.table("historical_matches")
+            .select("division,home_team,away_team")
+            .range(start, start + page_size - 1)
+            .execute()
         )
+        rows = response.data or []
+        for row in rows:
+            if row.get("division"):
+                divisions.add(str(row["division"]).strip())
+            if row.get("home_team"):
+                teams.add(str(row["home_team"]).strip())
+            if row.get("away_team"):
+                teams.add(str(row["away_team"]).strip())
+        if len(rows) < page_size:
+            break
+        start += page_size
 
-metric_left, metric_right = st.columns(2)
-metric_left.metric("Veritabanındaki geçmiş maç", f"{current_count:,}".replace(",", "."))
-metric_right.metric("Duplicate koruması", "Aktif")
+    return sorted(teams, key=str.casefold), sorted(divisions, key=str.casefold)
 
-st.divider()
-st.subheader("Geçmiş maç CSV dosyalarını toplu yükle")
-st.write(
-    "football-data.co.uk üzerinden indirdiğiniz tüm CSV dosyalarını aynı anda seçin. "
-    "Dosyalar birlikte kontrol edilir; siz düğmeye basmadan veritabanına yazılmaz."
-)
 
-uploaded_files = st.file_uploader(
-    "CSV dosyalarını seçin",
-    type=["csv"],
-    accept_multiple_files=True,
-    help="Windows'ta dosyaları Ctrl+A ile topluca seçebilirsiniz.",
-)
+def is_duplicate_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return "23505" in message or "duplicate key" in message or "unique constraint" in message
 
-if uploaded_files:
+
+def render_historical_page(client: Client) -> None:
+    st.caption("Aşama 1 · Geçmiş maç verilerinin güvenli ve tekrarsız yüklenmesi")
+
+    if "last_import_summary" in st.session_state:
+        summary = st.session_state.pop("last_import_summary")
+        st.success(
+            f"{summary['selected_files']} CSV dosyasından "
+            f"{summary['inserted']} yeni maç başarıyla eklendi."
+        )
+        if (
+            summary["file_duplicates"]
+            or summary["cross_file_duplicates"]
+            or summary["existing"]
+            or summary["race_duplicates"]
+        ):
+            st.info(
+                f"Atlanan tekrarlar — dosya içinde: {summary['file_duplicates']}, "
+                f"seçilen dosyalar arasında: {summary['cross_file_duplicates']}, "
+                f"veritabanında zaten bulunan: {summary['existing']}, "
+                f"eşzamanlı yakalanan: {summary['race_duplicates']}."
+            )
+
+    current_count = get_table_count(client, "historical_matches")
+    metric_left, metric_right = st.columns(2)
+    metric_left.metric("Veritabanındaki geçmiş maç", f"{current_count:,}".replace(",", "."))
+    metric_right.metric("Duplicate koruması", "Aktif")
+
+    st.divider()
+    st.subheader("Geçmiş maç CSV dosyalarını toplu yükle")
+    st.write(
+        "football-data.co.uk üzerinden indirdiğiniz tüm geçmiş CSV dosyalarını aynı anda "
+        "seçin. Dosyalar birlikte kontrol edilir; siz düğmeye basmadan veritabanına yazılmaz."
+    )
+
+    uploaded_files = st.file_uploader(
+        "Geçmiş CSV dosyalarını seçin",
+        type=["csv"],
+        accept_multiple_files=True,
+        help="Windows'ta dosyaları Ctrl+A ile topluca seçebilirsiniz.",
+        key="historical_uploader",
+    )
+
+    if not uploaded_files:
+        return
+
     valid_files: list[tuple[str, pd.DataFrame]] = []
     file_results: list[dict[str, object]] = []
     total_raw_rows = 0
@@ -196,10 +209,10 @@ if uploaded_files:
     if invalid_file_count:
         st.error(
             f"{invalid_file_count} dosya doğrulanamadı. Güvenli toplu işlem için hiçbir dosya "
-            "henüz veritabanına yazılmayacak. Hatalı dosyaları seçimden çıkarın veya düzeltin."
+            "veritabanına yazılmayacak."
         )
         st.caption("Gerekli temel sütunlar: " + ", ".join(REQUIRED_COLUMNS))
-        st.stop()
+        return
 
     combined_frame = pd.concat(
         [prepared for _, prepared in valid_files],
@@ -238,50 +251,33 @@ if uploaded_files:
     c.metric("Benzersiz maç", len(combined_frame))
     d.metric("Toplam tekrar", file_duplicate_count + cross_file_duplicate_count)
 
-    if file_duplicate_count or cross_file_duplicate_count:
-        st.info(
-            f"Tekrar ayrıntısı — dosyaların kendi içinde: {file_duplicate_count}, "
-            f"farklı dosyalar arasında: {cross_file_duplicate_count}."
-        )
-
-    st.dataframe(
-        preview_frame,
-        use_container_width=True,
-        hide_index=True,
-    )
+    st.dataframe(preview_frame, use_container_width=True, hide_index=True)
 
     if st.button(
-        "Tüm CSV dosyalarını veritabanına aktar",
+        "Tüm geçmiş CSV dosyalarını veritabanına aktar",
         type="primary",
         use_container_width=True,
     ):
-        with st.spinner("Tüm kayıtlar kontrol ediliyor ve yükleniyor..."):
+        with st.spinner("Tüm geçmiş kayıtlar kontrol ediliyor ve yükleniyor..."):
             try:
-                existing_keys = fetch_existing_match_keys(supabase)
+                existing_keys = fetch_existing_match_keys(client)
                 records: list[dict[str, object]] = []
-
                 for source_file, source_frame in combined_frame.groupby(
-                    "__source_file",
-                    sort=False,
+                    "__source_file", sort=False
                 ):
-                    clean_source_frame = source_frame.drop(columns=["__source_file"])
                     records.extend(
                         build_records(
-                            clean_source_frame,
+                            source_frame.drop(columns=["__source_file"]),
                             source_file=str(source_file),
                             existing_keys=existing_keys,
                         )
                     )
-
                 already_existing = len(combined_frame) - len(records)
-                inserted, race_duplicates = insert_new_records(supabase, records)
+                inserted, race_duplicates = insert_new_records(client, records)
             except Exception as exc:
-                st.error(
-                    "Toplu yükleme tamamlanamadı. Hiçbir şifreyi paylaşmadan "
-                    "hata metnini gönderin."
-                )
+                st.error("Toplu yükleme tamamlanamadı. Gizli bilgileri paylaşmadan hatayı gönderin.")
                 st.code(str(exc))
-                st.stop()
+                return
 
         st.session_state["last_import_summary"] = {
             "inserted": inserted,
@@ -292,6 +288,341 @@ if uploaded_files:
             "race_duplicates": race_duplicates,
         }
         st.rerun()
+
+
+def render_fixture_csv_tab(client: Client, today) -> None:
+    st.write(
+        "Bir veya birden fazla bülten CSV dosyası seçebilirsiniz. Yalnızca bugün ve "
+        "sonraki tarihlerdeki maçlar alınır."
+    )
+
+    fixture_files = st.file_uploader(
+        "Bülten CSV dosyalarını seçin",
+        type=["csv"],
+        accept_multiple_files=True,
+        key="fixture_uploader",
+    )
+
+    if not fixture_files:
+        return
+
+    valid_files: list[pd.DataFrame] = []
+    file_results: list[dict[str, object]] = []
+    total_rows = 0
+    past_rows = 0
+    within_file_duplicates = 0
+
+    for fixture_file in fixture_files:
+        try:
+            raw_frame = read_football_csv(fixture_file.getvalue())
+            prepared, duplicates, past_count = validate_and_prepare_fixtures(raw_frame, today)
+            prepared = prepared.copy()
+            prepared["__source_file"] = fixture_file.name
+            valid_files.append(prepared)
+            total_rows += len(raw_frame)
+            past_rows += past_count
+            within_file_duplicates += duplicates
+            file_results.append(
+                {
+                    "Dosya": fixture_file.name,
+                    "Durum": "Hazır",
+                    "Toplam satır": len(raw_frame),
+                    "Bugün/gelecek": len(prepared),
+                    "Geçmiş tarih": past_count,
+                    "Tekrar": duplicates,
+                    "Açıklama": "",
+                }
+            )
+        except ValueError as exc:
+            file_results.append(
+                {
+                    "Dosya": fixture_file.name,
+                    "Durum": "Hata",
+                    "Toplam satır": 0,
+                    "Bugün/gelecek": 0,
+                    "Geçmiş tarih": 0,
+                    "Tekrar": 0,
+                    "Açıklama": str(exc),
+                }
+            )
+
+    st.dataframe(file_results, use_container_width=True, hide_index=True)
+
+    invalid_count = sum(result["Durum"] == "Hata" for result in file_results)
+    if invalid_count:
+        st.error(
+            f"{invalid_count} bülten dosyası hatalı. Güvenli işlem için hiçbir dosya "
+            "veritabanına yazılmayacak."
+        )
+        st.caption("Gerekli bülten sütunları: " + ", ".join(FIXTURE_REQUIRED_COLUMNS))
+        return
+
+    non_empty_files = [frame for frame in valid_files if not frame.empty]
+    if not non_empty_files:
+        st.warning("Seçilen dosyalarda bugün veya sonrasına ait maç bulunamadı.")
+        return
+
+    combined = pd.concat(non_empty_files, ignore_index=True, sort=False)
+    cross_duplicate_mask = combined.duplicated(
+        subset=["_match_date", "_home_key", "_away_key"], keep="first"
+    )
+    cross_duplicates = int(cross_duplicate_mask.sum())
+    combined = combined.loc[~cross_duplicate_mask].reset_index(drop=True)
+
+    preview_columns = [
+        "__source_file",
+        "Div",
+        "Date",
+        "Time",
+        "HomeTeam",
+        "AwayTeam",
+        "B365H",
+        "B365D",
+        "B365A",
+        "B365>2.5",
+        "B365<2.5",
+    ]
+    preview_columns = [column for column in preview_columns if column in combined.columns]
+    preview = combined[preview_columns].head(30).rename(columns={"__source_file": "Dosya"})
+
+    a, b, c, d = st.columns(4)
+    a.metric("Seçilen bülten", len(fixture_files))
+    b.metric("Toplam satır", total_rows)
+    c.metric("Aktarılabilir maç", len(combined))
+    d.metric("Geçmiş tarih — atlandı", past_rows)
+
+    if within_file_duplicates or cross_duplicates:
+        st.info(
+            f"Tekrarlar — dosya içinde: {within_file_duplicates}, "
+            f"dosyalar arasında: {cross_duplicates}."
+        )
+
+    st.dataframe(preview, use_container_width=True, hide_index=True)
+
+    if st.button(
+        "Tüm bülten maçlarını veritabanına aktar",
+        type="primary",
+        use_container_width=True,
+    ):
+        with st.spinner("Bülten maçları kontrol ediliyor ve yükleniyor..."):
+            try:
+                existing_keys = fetch_existing_upcoming_match_keys(client)
+                records: list[dict[str, object]] = []
+                for source_file, source_frame in combined.groupby("__source_file", sort=False):
+                    records.extend(
+                        build_upcoming_records(
+                            source_frame.drop(columns=["__source_file"]),
+                            source_file=str(source_file),
+                            existing_keys=existing_keys,
+                        )
+                    )
+                already_existing = len(combined) - len(records)
+                inserted, race_duplicates = insert_upcoming_records(client, records)
+            except Exception as exc:
+                st.error("Bülten yüklenemedi. Gizli bilgileri paylaşmadan hatayı gönderin.")
+                st.code(str(exc))
+                return
+
+        st.session_state["last_fixture_summary"] = {
+            "files": len(fixture_files),
+            "inserted": inserted,
+            "past": past_rows,
+            "within_duplicates": within_file_duplicates,
+            "cross_duplicates": cross_duplicates,
+            "existing": already_existing,
+            "race_duplicates": race_duplicates,
+        }
+        st.rerun()
+
+
+def render_manual_fixture_tab(client: Client, today) -> None:
+    teams, divisions = fetch_team_catalog(client)
+    if len(teams) < 2 or not divisions:
+        st.error("Manuel giriş için geçmiş verilerden yeterli takım veya lig bulunamadı.")
+        return
+
+    st.write("Takım kutularında yazarak veritabanındaki takım adlarını filtreleyebilirsiniz.")
+
+    with st.form("manual_fixture_form", clear_on_submit=False):
+        division = st.selectbox("Lig", divisions)
+        date_col, time_col = st.columns(2)
+        match_date = date_col.date_input("Maç tarihi", value=today, min_value=today)
+        kickoff_time = time_col.time_input("Maç saati", value=time(20, 0))
+
+        team_left, team_right = st.columns(2)
+        home_team = team_left.selectbox("Ev sahibi", teams, index=0)
+        away_team = team_right.selectbox("Deplasman", teams, index=1)
+
+        odd_1, odd_x, odd_2 = st.columns(3)
+        b365_home = odd_1.number_input("Bet365 MS 1", min_value=1.01, value=2.00, step=0.01)
+        b365_draw = odd_x.number_input("Bet365 X", min_value=1.01, value=3.00, step=0.01)
+        b365_away = odd_2.number_input("Bet365 MS 2", min_value=1.01, value=3.00, step=0.01)
+
+        over_col, under_col = st.columns(2)
+        b365_over = over_col.number_input(
+            "Bet365 2.5 Üst — yoksa 0", min_value=0.0, value=0.0, step=0.01
+        )
+        b365_under = under_col.number_input(
+            "Bet365 2.5 Alt — yoksa 0", min_value=0.0, value=0.0, step=0.01
+        )
+
+        submitted = st.form_submit_button(
+            "Maçı kaydet", type="primary", use_container_width=True
+        )
+
+    if not submitted:
+        return
+
+    if home_team == away_team:
+        st.error("Ev sahibi ve deplasman takımı aynı olamaz.")
+        return
+
+    record = {
+        "division": division,
+        "match_date": match_date.isoformat(),
+        "kickoff_time": kickoff_time.strftime("%H:%M:%S"),
+        "home_team": home_team,
+        "away_team": away_team,
+        "b365_home": float(b365_home),
+        "b365_draw": float(b365_draw),
+        "b365_away": float(b365_away),
+        "b365_over_25": float(b365_over) if b365_over > 0 else None,
+        "b365_under_25": float(b365_under) if b365_under > 0 else None,
+        "entry_method": "manual",
+        "raw_data": {},
+    }
+
+    try:
+        client.table("upcoming_matches").insert(record, returning="minimal").execute()
+    except Exception as exc:
+        if is_duplicate_error(exc):
+            st.warning("Bu tarih ve takım eşleşmesi yaklaşan maçlarda zaten kayıtlı.")
+        else:
+            st.error("Maç kaydedilemedi. Gizli bilgileri paylaşmadan hatayı gönderin.")
+            st.code(str(exc))
+        return
+
+    st.session_state["last_manual_fixture"] = (
+        f"{match_date.strftime('%d.%m.%Y')} · {home_team} — {away_team} kaydedildi."
+    )
+    st.rerun()
+
+
+def render_upcoming_list_tab(client: Client, today) -> None:
+    try:
+        response = (
+            client.table("upcoming_matches")
+            .select(
+                "division,match_date,kickoff_time,home_team,away_team,"
+                "b365_home,b365_draw,b365_away,b365_over_25,b365_under_25,"
+                "entry_method,match_status"
+            )
+            .gte("match_date", today.isoformat())
+            .order("match_date")
+            .order("kickoff_time")
+            .limit(1000)
+            .execute()
+        )
+    except Exception as exc:
+        st.error("Yaklaşan maç listesi alınamadı.")
+        st.code(str(exc))
+        return
+
+    rows = response.data or []
+    if not rows:
+        st.info("Henüz bugün veya sonrasına ait yaklaşan maç kaydı yok.")
+        return
+
+    frame = pd.DataFrame(rows).rename(
+        columns={
+            "division": "Lig",
+            "match_date": "Tarih",
+            "kickoff_time": "Saat",
+            "home_team": "Ev sahibi",
+            "away_team": "Deplasman",
+            "b365_home": "MS 1",
+            "b365_draw": "X",
+            "b365_away": "MS 2",
+            "b365_over_25": "2.5 Üst",
+            "b365_under_25": "2.5 Alt",
+            "entry_method": "Giriş",
+            "match_status": "Durum",
+        }
+    )
+    st.dataframe(frame, use_container_width=True, hide_index=True)
+
+
+def render_upcoming_page(client: Client) -> None:
+    today = datetime.now(ZoneInfo("Europe/Istanbul")).date()
+    st.caption("Aşama 2 · Bülten CSV yükleme ve manuel yaklaşan maç girişi")
+
+    if "last_fixture_summary" in st.session_state:
+        summary = st.session_state.pop("last_fixture_summary")
+        st.success(
+            f"{summary['files']} bülten dosyasından {summary['inserted']} yeni yaklaşan maç eklendi."
+        )
+        st.info(
+            f"Atlananlar — geçmiş tarih: {summary['past']}, dosya içi tekrar: "
+            f"{summary['within_duplicates']}, dosyalar arası tekrar: "
+            f"{summary['cross_duplicates']}, veritabanında bulunan: {summary['existing']}, "
+            f"eşzamanlı tekrar: {summary['race_duplicates']}."
+        )
+
+    if "last_manual_fixture" in st.session_state:
+        st.success(st.session_state.pop("last_manual_fixture"))
+
+    total_upcoming = get_table_count(client, "upcoming_matches")
+    metric_left, metric_right = st.columns(2)
+    metric_left.metric("Kayıtlı yaklaşan maç", total_upcoming)
+    metric_right.metric("Tarih filtresi", f"{today.strftime('%d.%m.%Y')} ve sonrası")
+
+    csv_tab, manual_tab, list_tab = st.tabs(
+        ["Toplu Bülten CSV", "Manuel Maç Girişi", "Yaklaşan Maç Listesi"]
+    )
+    with csv_tab:
+        render_fixture_csv_tab(client, today)
+    with manual_tab:
+        render_manual_fixture_tab(client, today)
+    with list_tab:
+        render_upcoming_list_tab(client, today)
+
+
+st.title("⚽ Futbol Tahmin ve Analiz")
+
+with st.sidebar:
+    st.subheader("Proje durumu")
+    st.success("Veritabanı tabloları hazır")
+    if st.session_state.get("authenticated") is True:
+        if st.button("Güvenli çıkış"):
+            st.session_state["authenticated"] = False
+            st.rerun()
+
+stop_if_secrets_missing()
+require_login()
+
+with st.sidebar:
+    section = st.radio(
+        "Bölüm", ["Geçmiş Veri", "Yaklaşan Maçlar"], key="app_section"
+    )
+    st.caption("Tahmin ve canlı araştırma sonraki aşamada eklenecek.")
+
+try:
+    supabase = get_supabase_client()
+except Exception as exc:
+    st.error("Supabase bağlantısı kurulamadı.")
+    st.code(str(exc))
+    st.stop()
+
+st.success("Supabase bağlantısı başarılı.")
+
+try:
+    if section == "Geçmiş Veri":
+        render_historical_page(supabase)
+    else:
+        render_upcoming_page(supabase)
+except Exception as exc:
+    st.error("Ekran hazırlanırken beklenmeyen bir hata oluştu.")
+    st.code(str(exc))
 
 st.divider()
 st.markdown(

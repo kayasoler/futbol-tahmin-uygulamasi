@@ -10,5 +10,7 @@ Onemli:
 - Supabase servis anahtarinizi hicbir dosyaya yazmayin.
 - Anahtarlar daha sonra Streamlit Secrets ekranina girilecektir.
 - Streamlit Secrets ekraninda APP_PASSWORD adinda guclu bir giris parolasi belirleyin.
-- Uygulama bu asamada cok sayida gecmis CSV dosyasini tek seferde yukler.
+- Uygulama cok sayida gecmis CSV dosyasini tek seferde yukler.
+- Bulten CSV dosyalarindan yalnizca bugun ve sonraki tarihlerdeki maclari alir.
+- Yaklasan maclar, veritabanindaki takim adlariyla manuel olarak da eklenebilir.
 - Ayni mac dosya icinde, dosyalar arasinda veya veritabaninda varsa tekrar eklenmez.
