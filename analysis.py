@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from collections import Counter
 from typing import Any
+from urllib.parse import quote_plus
+import xml.etree.ElementTree as ET
 
 import pandas as pd
+import requests
 
 
 HISTORICAL_COLUMNS = (
@@ -11,6 +14,47 @@ HISTORICAL_COLUMNS = (
     "full_time_away_goals,full_time_result,half_time_result,"
     "b365_home,b365_draw,b365_away,b365_over_25,b365_under_25"
 )
+
+
+def fetch_live_news(home_team: str, away_team: str, max_items: int = 12) -> list[dict[str, str]]:
+    """Search Google News RSS without requiring a paid API key."""
+    queries = [
+        f'"{home_team}" futbol sakatlık ceza kadro',
+        f'"{away_team}" futbol sakatlık ceza kadro',
+        f'"{home_team}" "{away_team}" maç haber',
+    ]
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; FootballAnalysis/1.0)"}
+    found: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    for query in queries:
+        url = (
+            "https://news.google.com/rss/search?q="
+            + quote_plus(query)
+            + "&hl=tr&gl=TR&ceid=TR:tr"
+        )
+        response = requests.get(url, headers=headers, timeout=12)
+        response.raise_for_status()
+        root = ET.fromstring(response.content)
+        for item in root.findall("./channel/item"):
+            title = (item.findtext("title") or "").strip()
+            link = (item.findtext("link") or "").strip()
+            source = (item.findtext("source") or "").strip()
+            published = (item.findtext("pubDate") or "").strip()
+            if not title or not link or link in seen:
+                continue
+            seen.add(link)
+            found.append(
+                {
+                    "title": title,
+                    "link": link,
+                    "source": source or "Google News",
+                    "published": published,
+                }
+            )
+            if len(found) >= max_items:
+                return found
+    return found
 
 
 def _key(value: Any) -> str:

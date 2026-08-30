@@ -11,6 +11,7 @@ from supabase import Client, create_client
 from analysis import (
     build_report,
     fetch_h2h_rows,
+    fetch_live_news,
     fetch_league_rows,
     fetch_same_odds_rows,
     h2h_summary_tables,
@@ -622,6 +623,47 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
         f"İstatistik örneklemi: {predictions['sample_size']} tamamlanmış lig maçı. "
         "Bu çıktı kesin sonuç veya kazanç garantisi değildir."
     )
+
+    st.markdown("#### 4. Canlı internet araştırması")
+    st.write(
+        "Takımların güncel haber başlıklarını, sakatlık/ceza ve kadro bilgilerini "
+        "ücretsiz Google News RSS üzerinden arayın."
+    )
+    news_state_key = f"live_news_{match.get('id')}"
+    if st.button(
+        "Canlı haberleri ara",
+        key=f"search_news_{match.get('id')}",
+        use_container_width=True,
+    ):
+        with st.spinner("Güncel haberler aranıyor..."):
+            try:
+                st.session_state[news_state_key] = fetch_live_news(home, away)
+            except Exception as exc:
+                st.session_state[news_state_key] = {"error": str(exc)}
+        st.rerun()
+
+    news_result = st.session_state.get(news_state_key)
+    if isinstance(news_result, dict) and "error" in news_result:
+        st.warning(
+            "Haber servisine şu anda ulaşılamadı. İstatistiksel rapor yine kullanılabilir."
+        )
+    elif news_result is None:
+        st.info("Haber aramasını başlatmak için yukarıdaki düğmeye basın.")
+    elif not news_result:
+        st.info("Bu maç için güncel haber başlığı bulunamadı.")
+    else:
+        for news in news_result:
+            title = str(news["title"]).replace("[", "(").replace("]", ")")
+            source = str(news["source"]).replace("[", "(").replace("]", ")")
+            published = str(news["published"]).replace("[", "(").replace("]", ")")
+            st.markdown(
+                f"- [{title}]({news['link']})  \n"
+                f"  {source} · {published}"
+            )
+        st.caption(
+            "Haber başlıkları otomatik toplanır; maç kadrosu ve haber içeriği "
+            "başlamadan önce ayrıca doğrulanmalıdır."
+        )
 
 
 def render_upcoming_list_tab(client: Client, today) -> None:
