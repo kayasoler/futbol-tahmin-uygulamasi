@@ -1,0 +1,12 @@
+FUTBOL TAHMIN VE ANALIZ UYGULAMASI - ASAMA 1
+
+Bu paketteki dosyalar:
+- app.py: Streamlit arayuzu
+- data_import.py: CSV kontrolu ve tekrar engelleme
+- requirements.txt: Ucretsiz bulutun kuracagi kutuphaneler
+- .gitignore: Gizli anahtarlarin GitHub'a yuklenmesini engeller
+
+Onemli:
+- Supabase servis anahtarinizi hicbir dosyaya yazmayin.
+- Anahtarlar daha sonra Streamlit Secrets ekranina girilecektir.
+- Uygulama bu asamada yalnizca gecmis CSV yukler.
