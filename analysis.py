@@ -74,9 +74,9 @@ def fetch_league_rows(client, division: str) -> list[dict[str, Any]]:
 def fetch_same_odds_rows(
     client,
     match: dict[str, Any],
-    division_rows: list[dict[str, Any]],
+    division: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Find historical rows in the same league with identical Bet365 MS odds."""
+    """Find historical rows with identical Bet365 MS odds."""
     target = tuple(
         round(value, 2) if (value := _number(match.get(column))) is not None else None
         for column in ("b365_home", "b365_draw", "b365_away")
@@ -84,15 +84,31 @@ def fetch_same_odds_rows(
     if any(value is None for value in target):
         return []
 
-    matches: list[dict[str, Any]] = []
-    for row in division_rows:
-        candidate = tuple(
-            round(value, 2) if (value := _number(row.get(column))) is not None else None
-            for column in ("b365_home", "b365_draw", "b365_away")
+    query = client.table("historical_matches").select(HISTORICAL_COLUMNS)
+    if division:
+        query = query.eq("division", division)
+    for column, value in zip(
+        ("b365_home", "b365_draw", "b365_away"),
+        target,
+    ):
+        query = query.eq(column, value)
+
+    rows: list[dict[str, Any]] = []
+    page_size = 1000
+    start = 0
+    while True:
+        page = (
+            query.order("match_date", desc=True)
+            .range(start, start + page_size - 1)
+            .execute()
+            .data
+            or []
         )
-        if candidate == target:
-            matches.append(row)
-    return matches
+        rows.extend(page)
+        if len(page) < page_size:
+            break
+        start += page_size
+    return rows
 
 
 def _result_label(row: dict[str, Any]) -> str:
@@ -135,6 +151,100 @@ def rows_to_table(rows: list[dict[str, Any]]) -> pd.DataFrame:
             }
         )
     return pd.DataFrame(output)
+
+
+def h2h_summary_tables(
+    rows: list[dict[str, Any]],
+    selected_home: str,
+    selected_away: str,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Create outcome and goal-line summaries from the selected home team's perspective."""
+    selected_home_key = _key(selected_home)
+    selected_away_key = _key(selected_away)
+    home_wins = draws = away_wins = 0
+    total_rows: list[dict[str, Any]] = []
+    for threshold in (0.5, 1.5, 2.5, 3.5):
+        over_count = 0
+        under_count = 0
+        for row in rows:
+            home_goals = _number(row.get("full_time_home_goals"))
+            away_goals = _number(row.get("full_time_away_goals"))
+            if home_goals is None or away_goals is None:
+                continue
+            if home_goals + away_goals > threshold:
+                over_count += 1
+            else:
+                under_count += 1
+        total_rows.append(
+            {
+                "Gol baremi": f"{threshold}",
+                "Üst": over_count,
+                "Alt": under_count,
+                "Üst oranı": f"{over_count / len(rows) * 100:.1f}%" if rows else "—",
+            }
+        )
+
+    for row in rows:
+        result = str(row.get("full_time_result") or "").strip().upper()
+        row_home_key = _key(row.get("home_team"))
+        if result == "H":
+            winner_key = row_home_key
+        elif result == "A":
+            winner_key = _key(row.get("away_team"))
+        elif result == "D":
+            winner_key = None
+        else:
+            home_goals = _number(row.get("full_time_home_goals"))
+            away_goals = _number(row.get("full_time_away_goals"))
+            if home_goals is None or away_goals is None:
+                winner_key = None
+            elif home_goals > away_goals:
+                winner_key = row_home_key
+            elif away_goals > home_goals:
+                winner_key = _key(row.get("away_team"))
+            else:
+                winner_key = None
+
+        if winner_key is None:
+            draws += 1
+        elif winner_key == selected_home_key:
+            home_wins += 1
+        elif winner_key == selected_away_key:
+            away_wins += 1
+
+    outcome_table = pd.DataFrame(
+        [
+            {"Sonuç özeti": f"{selected_home} galibiyeti", "Maç sayısı": home_wins},
+            {"Sonuç özeti": "Beraberlik", "Maç sayısı": draws},
+            {"Sonuç özeti": f"{selected_away} galibiyeti", "Maç sayısı": away_wins},
+            {"Sonuç özeti": "Toplam karşılaşma", "Maç sayısı": len(rows)},
+        ]
+    )
+    return outcome_table, pd.DataFrame(total_rows)
+
+
+def odds_summary_table(rows: list[dict[str, Any]]) -> pd.DataFrame:
+    """Summarize results of a same-odds comparison group."""
+    summary: dict[str, Any] = {"Maç sayısı": len(rows)}
+    for result, label in (("H", "Ev galibiyeti"), ("D", "Beraberlik"), ("A", "Deplasman galibiyeti")):
+        summary[label] = sum(
+            str(row.get("full_time_result") or "").strip().upper() == result
+            for row in rows
+        )
+    for threshold in (0.5, 1.5, 2.5, 3.5):
+        over_count = 0
+        for row in rows:
+            home_goals = _number(row.get("full_time_home_goals"))
+            away_goals = _number(row.get("full_time_away_goals"))
+            if home_goals is not None and away_goals is not None and home_goals + away_goals > threshold:
+                over_count += 1
+        summary[f"Üst {threshold}"] = over_count
+    summary["KG Var"] = sum(
+        (_number(row.get("full_time_home_goals")) or 0) > 0
+        and (_number(row.get("full_time_away_goals")) or 0) > 0
+        for row in rows
+    )
+    return pd.DataFrame([summary])
 
 
 def _most_common(values: list[str]) -> str:

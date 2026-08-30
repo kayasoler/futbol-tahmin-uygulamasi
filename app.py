@@ -13,6 +13,8 @@ from analysis import (
     fetch_h2h_rows,
     fetch_league_rows,
     fetch_same_odds_rows,
+    h2h_summary_tables,
+    odds_summary_table,
     rows_to_table,
 )
 from data_import import (
@@ -532,8 +534,9 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
         try:
             h2h_rows = fetch_h2h_rows(client, match)
             league_rows = fetch_league_rows(client, division)
-            same_odds_rows = fetch_same_odds_rows(client, match, league_rows)
-            report = build_report(match, h2h_rows, same_odds_rows, league_rows)
+            same_league_rows = fetch_same_odds_rows(client, match, division)
+            same_all_rows = fetch_same_odds_rows(client, match)
+            report = build_report(match, h2h_rows, same_league_rows, league_rows)
         except Exception as exc:
             st.error("Analiz verileri alınamadı.")
             st.code(str(exc))
@@ -546,22 +549,46 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
 
     st.markdown("#### 1. Geçmiş rekabet · Son 10 maç")
     if h2h_rows:
+        outcome_summary, goal_summary = h2h_summary_tables(h2h_rows, home, away)
+        st.dataframe(outcome_summary, use_container_width=True, hide_index=True)
+        st.dataframe(goal_summary, use_container_width=True, hide_index=True)
         st.dataframe(rows_to_table(h2h_rows), use_container_width=True, hide_index=True)
     else:
         st.info("Bu iki takım arasında veritabanında geçmiş karşılaşma bulunamadı.")
 
     st.markdown("#### 2. Aynı Bet365 oran analizi")
     st.caption(
-        f"Aynı ligde MS oranları birebir eşleşen geçmiş maç sayısı: {len(same_odds_rows)}"
+        "Önce aynı lig, ardından tüm ligler içindeki birebir MS oranı eşleşmeleri gösterilir."
     )
-    if same_odds_rows:
+    st.markdown("##### A) Aynı ligde aynı oranlar")
+    if same_league_rows:
         st.dataframe(
-            rows_to_table(same_odds_rows),
+            odds_summary_table(same_league_rows),
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.dataframe(
+            rows_to_table(same_league_rows),
             use_container_width=True,
             hide_index=True,
         )
     else:
         st.info("Bu ligde aynı üçlü Bet365 MS oranına sahip geçmiş maç bulunamadı.")
+
+    st.markdown("##### B) Tüm liglerde aynı oranlar")
+    if same_all_rows:
+        st.dataframe(
+            odds_summary_table(same_all_rows),
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.dataframe(
+            rows_to_table(same_all_rows),
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.info("Tüm geçmiş veriler içinde aynı üçlü Bet365 MS oranına sahip maç bulunamadı.")
 
     predictions = report["predictions"]
     st.markdown("#### 3. Tahmin özeti")
