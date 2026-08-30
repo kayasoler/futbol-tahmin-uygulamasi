@@ -15,6 +15,7 @@ from analysis import (
     fetch_league_rows,
     fetch_same_odds_rows,
     h2h_summary_tables,
+    news_signal_summary,
     odds_summary_table,
     rows_to_table,
 )
@@ -616,9 +617,9 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
     )
     st.dataframe(totals_frame, use_container_width=True, hide_index=True)
 
-    st.markdown("#### Yapay zekâ destekli istatistiksel yorum")
+    st.markdown("#### İstatistiksel yorum")
     st.write(report["comment"])
-    st.success(f"Kupon Önerisi: {report['coupon']}")
+    st.info(f"İstatistiksel ön kupon: {report['coupon']}")
     st.caption(
         f"İstatistik örneklemi: {predictions['sample_size']} tamamlanmış lig maçı. "
         "Bu çıktı kesin sonuç veya kazanç garantisi değildir."
@@ -664,6 +665,11 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
             "Haber başlıkları otomatik toplanır; maç kadrosu ve haber içeriği "
             "başlamadan önce ayrıca doğrulanmalıdır."
         )
+        st.markdown("#### 5. Canlı haberlerle birleştirilmiş final yorum")
+        st.write(
+            report["comment"] + " " + news_signal_summary(news_result, home, away)
+        )
+        st.success(f"Kupon Önerisi: {report['coupon']}")
 
 
 def render_upcoming_list_tab(client: Client, today) -> None:

@@ -57,6 +57,57 @@ def fetch_live_news(home_team: str, away_team: str, max_items: int = 12) -> list
     return found
 
 
+def news_signal_summary(
+    news: list[dict[str, str]],
+    home_team: str,
+    away_team: str,
+) -> str:
+    """Turn headline keywords into a cautious, transparent match note."""
+    negative_words = (
+        "sakat", "sakatlık", "injur", "ceza", "cezalı", "suspended",
+        "eksik", "yok", "doubtful", "out", "kriz", "mağlub", "yenil",
+        "loss", "defeat",
+    )
+    positive_words = (
+        "form", "galib", "kazan", "win", "victory", "unbeaten",
+        "dönüyor", "hazır", "return", "fit",
+    )
+    home_key = _key(home_team)
+    away_key = _key(away_team)
+    scores = {home_key: 0, away_key: 0}
+    labels = {home_key: home_team, away_key: away_team}
+    matched_titles: list[str] = []
+
+    for item in news:
+        title = str(item.get("title") or "")
+        title_key = title.casefold()
+        team_key = home_key if home_key in title_key else away_key if away_key in title_key else None
+        if team_key is None:
+            continue
+        negative = sum(word in title_key for word in negative_words)
+        positive = sum(word in title_key for word in positive_words)
+        scores[team_key] += positive - negative
+        if negative or positive:
+            matched_titles.append(title)
+
+    if not news:
+        return "Canlı taramada kullanılabilir bir haber başlığı bulunamadı; yorum yalnızca istatistiklere dayanıyor."
+
+    if not matched_titles:
+        return (
+            f"{len(news)} haber başlığı bulundu ancak başlıklarda {home_team} veya {away_team} "
+            "için belirgin bir olumlu/olumsuz sinyal tespit edilmedi. İstatistiksel tahmin korunuyor."
+        )
+
+    home_signal = "olumlu" if scores[home_key] > 0 else "olumsuz" if scores[home_key] < 0 else "belirsiz"
+    away_signal = "olumlu" if scores[away_key] > 0 else "olumsuz" if scores[away_key] < 0 else "belirsiz"
+    return (
+        f"Canlı başlık sinyallerinde {home_team} için {home_signal}, {away_team} için "
+        f"{away_signal} görünüm var. Bu sinyal yalnızca haber başlıklarındaki anahtar "
+        "kelimelerden çıkarılmıştır; haber metni ve resmi kadro açıklaması ayrıca doğrulanmalıdır."
+    )
+
+
 def _key(value: Any) -> str:
     return str(value or "").strip().casefold()
 
