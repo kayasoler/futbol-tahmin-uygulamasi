@@ -8,6 +8,13 @@ import pandas as pd
 import streamlit as st
 from supabase import Client, create_client
 
+from analysis import (
+    build_report,
+    fetch_h2h_rows,
+    fetch_league_rows,
+    fetch_same_odds_rows,
+    rows_to_table,
+)
 from data_import import (
     FIXTURE_REQUIRED_COLUMNS,
     REQUIRED_COLUMNS,
@@ -508,12 +515,94 @@ def render_manual_fixture_tab(client: Client, today) -> None:
     st.rerun()
 
 
+def render_match_analysis(client: Client, match: dict[str, object]) -> None:
+    home = str(match.get("home_team") or "")
+    away = str(match.get("away_team") or "")
+    division = str(match.get("division") or "")
+    st.divider()
+    st.subheader(f"📊 Maç analizi · {home} — {away}")
+    st.caption(
+        f"{division} · {match.get('match_date', '—')} · {match.get('kickoff_time', '—')}"
+    )
+
+    if st.button("Analizi yenile", key=f"refresh_analysis_{match.get('id')}"):
+        st.rerun()
+
+    with st.spinner("Geçmiş rekabet ve aynı oran verileri hesaplanıyor..."):
+        try:
+            h2h_rows = fetch_h2h_rows(client, match)
+            league_rows = fetch_league_rows(client, division)
+            same_odds_rows = fetch_same_odds_rows(client, match, league_rows)
+            report = build_report(match, h2h_rows, same_odds_rows, league_rows)
+        except Exception as exc:
+            st.error("Analiz verileri alınamadı.")
+            st.code(str(exc))
+            return
+
+    st.info(
+        "Bu ilk analiz sürümü geçmiş veriler ve Bet365 oranlarıyla çalışır. "
+        "Canlı haber/sakatlık taraması bir sonraki aşamada eklenecektir."
+    )
+
+    st.markdown("#### 1. Geçmiş rekabet · Son 10 maç")
+    if h2h_rows:
+        st.dataframe(rows_to_table(h2h_rows), use_container_width=True, hide_index=True)
+    else:
+        st.info("Bu iki takım arasında veritabanında geçmiş karşılaşma bulunamadı.")
+
+    st.markdown("#### 2. Aynı Bet365 oran analizi")
+    st.caption(
+        f"Aynı ligde MS oranları birebir eşleşen geçmiş maç sayısı: {len(same_odds_rows)}"
+    )
+    if same_odds_rows:
+        st.dataframe(
+            rows_to_table(same_odds_rows),
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.info("Bu ligde aynı üçlü Bet365 MS oranına sahip geçmiş maç bulunamadı.")
+
+    predictions = report["predictions"]
+    st.markdown("#### 3. Tahmin özeti")
+    p1, p2, p3, p4 = st.columns(4)
+    p1.metric("MS", predictions["ms"])
+    p2.metric("İY/MS", predictions["ht_ms"])
+    p3.metric("Skor", predictions["score"])
+    p4.metric("KG", predictions["btts_prediction"])
+
+    totals = predictions["totals"]
+    totals_frame = pd.DataFrame(
+        [
+            {
+                "Baremi": f"{threshold} üst/alt",
+                "Tahmin": data["prediction"],
+                "Geçmiş olasılık": (
+                    f"{data['probability'] * 100:.1f}%"
+                    if data["probability"] is not None
+                    else "—"
+                ),
+            }
+            for threshold, data in totals.items()
+        ]
+    )
+    st.dataframe(totals_frame, use_container_width=True, hide_index=True)
+
+    st.markdown("#### Yapay zekâ destekli istatistiksel yorum")
+    st.write(report["comment"])
+    st.success(f"Kupon Önerisi: {report['coupon']}")
+    st.caption(
+        f"İstatistik örneklemi: {predictions['sample_size']} tamamlanmış lig maçı. "
+        "Bu çıktı kesin sonuç veya kazanç garantisi değildir."
+    )
+
+
 def render_upcoming_list_tab(client: Client, today) -> None:
     try:
         response = (
             client.table("upcoming_matches")
             .select(
-                "division,match_date,kickoff_time,home_team,away_team,"
+                "id,division,match_date,kickoff_time,home_team,away_team,"
                 "b365_home,b365_draw,b365_away,b365_over_25,b365_under_25,"
                 "entry_method,match_status"
             )
@@ -535,6 +624,7 @@ def render_upcoming_list_tab(client: Client, today) -> None:
 
     frame = pd.DataFrame(rows).rename(
         columns={
+            "id": "Kayıt ID",
             "division": "Lig",
             "match_date": "Tarih",
             "kickoff_time": "Saat",
@@ -549,12 +639,26 @@ def render_upcoming_list_tab(client: Client, today) -> None:
             "match_status": "Durum",
         }
     )
-    st.dataframe(frame, use_container_width=True, hide_index=True)
+    frame = frame.drop(columns=["Kayıt ID"], errors="ignore")
+    st.caption("Analiz başlatmak için aşağıdaki tabloda bir maç satırına tıklayın.")
+    selection_event = st.dataframe(
+        frame,
+        use_container_width=True,
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        key="upcoming_match_selector",
+    )
+    selected_rows = getattr(getattr(selection_event, "selection", None), "rows", [])
+    if selected_rows:
+        selected_index = int(selected_rows[0])
+        if 0 <= selected_index < len(rows):
+            render_match_analysis(client, rows[selected_index])
 
 
 def render_upcoming_page(client: Client) -> None:
     today = datetime.now(ZoneInfo("Europe/Istanbul")).date()
-    st.caption("Aşama 2 · Bülten CSV yükleme ve manuel yaklaşan maç girişi")
+    st.caption("Aşama 3 · Geçmiş istatistik ve oran analizi")
 
     if "last_fixture_summary" in st.session_state:
         summary = st.session_state.pop("last_fixture_summary")
@@ -604,7 +708,7 @@ with st.sidebar:
     section = st.radio(
         "Bölüm", ["Geçmiş Veri", "Yaklaşan Maçlar"], key="app_section"
     )
-    st.caption("Tahmin ve canlı araştırma sonraki aşamada eklenecek.")
+    st.caption("Maç satırına tıklayarak istatistiksel analiz başlatabilirsiniz.")
 
 try:
     supabase = get_supabase_client()

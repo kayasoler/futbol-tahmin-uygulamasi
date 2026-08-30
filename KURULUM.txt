@@ -1,4 +1,4 @@
-FUTBOL TAHMIN VE ANALIZ UYGULAMASI - ASAMA 1
+FUTBOL TAHMIN VE ANALIZ UYGULAMASI - ASAMA 3
 
 Bu paketteki dosyalar:
 - app.py: Streamlit arayuzu
@@ -14,3 +14,5 @@ Onemli:
 - Bulten CSV dosyalarindan yalnizca bugun ve sonraki tarihlerdeki maclari alir.
 - Yaklasan maclar, veritabanindaki takim adlariyla manuel olarak da eklenebilir.
 - Ayni mac dosya icinde, dosyalar arasinda veya veritabaninda varsa tekrar eklenmez.
+- Yaklasan mac listesindeki bir satira tiklayarak gecmis istatistik ve oran analizini acabilirsiniz.
+- Canli haber ve sakatlik taramasi sonraki gelistirme asamasinda eklenecektir.
