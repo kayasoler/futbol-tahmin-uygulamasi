@@ -10,4 +10,5 @@ Onemli:
 - Supabase servis anahtarinizi hicbir dosyaya yazmayin.
 - Anahtarlar daha sonra Streamlit Secrets ekranina girilecektir.
 - Streamlit Secrets ekraninda APP_PASSWORD adinda guclu bir giris parolasi belirleyin.
-- Uygulama bu asamada yalnizca gecmis CSV yukler.
+- Uygulama bu asamada cok sayida gecmis CSV dosyasini tek seferde yukler.
+- Ayni mac dosya icinde, dosyalar arasinda veya veritabaninda varsa tekrar eklenmez.
