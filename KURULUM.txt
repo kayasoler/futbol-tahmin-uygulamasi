@@ -16,6 +16,6 @@ Onemli:
 - Ayni mac dosya icinde, dosyalar arasinda veya veritabaninda varsa tekrar eklenmez.
 - Yaklasan mac listesindeki bir satira tiklayarak gecmis istatistik ve oran analizini acabilirsiniz.
 - Gemini Google Search ile secili maci canli olarak arastirir ve kaynaklari gosterir.
-- Ucretsiz kotada once Gemini 2.5 Flash, kota sorunu olursa Flash-Lite otomatik kullanilir.
+- Ucretsiz kotada once Gemini 3.5 Flash-Lite, gerekirse Gemini 3.6/3.5 Flash otomatik kullanilir.
 - Tahmin modeli takimlarin son ic saha/dis saha formunu, gol ortalamalarini, oranlari ve Poisson olasiliklarini birlikte kullanir.
 - Streamlit Secrets icinde GEMINI_API_KEY varsa Gemini tum istatistiklerle kendi tahminlerini ve kupon yorumunu uretir.

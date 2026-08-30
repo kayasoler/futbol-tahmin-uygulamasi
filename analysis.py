@@ -101,7 +101,11 @@ En fazla iki seçimden oluşan tek net kupon yaz. Güven düşükse açıkça "K
     interaction = None
     model_used = ""
     errors: list[str] = []
-    for model_name in ("gemini-2.5-flash", "gemini-2.5-flash-lite"):
+    for model_name in (
+        "gemini-3.5-flash-lite",
+        "gemini-3.6-flash",
+        "gemini-3.5-flash",
+    ):
         try:
             interaction = client.interactions.create(
                 model=model_name,
