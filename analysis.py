@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+import math
 from typing import Any
 from urllib.parse import quote_plus
 import xml.etree.ElementTree as ET
@@ -342,6 +343,26 @@ def odds_summary_table(rows: list[dict[str, Any]]) -> pd.DataFrame:
     return pd.DataFrame([summary])
 
 
+def fetch_team_form_rows(
+    client,
+    team_name: str,
+    venue: str,
+    limit: int = 10,
+) -> list[dict[str, Any]]:
+    """Fetch a team's latest home or away matches for match-specific form."""
+    key = _key(team_name)
+    column = "home_team_key" if venue == "home" else "away_team_key"
+    response = (
+        client.table("historical_matches")
+        .select(HISTORICAL_COLUMNS)
+        .eq(column, key)
+        .order("match_date", desc=True)
+        .limit(limit)
+        .execute()
+    )
+    return response.data or []
+
+
 def _most_common(values: list[str]) -> str:
     clean = [value for value in values if value and value != "Bilinmiyor"]
     return Counter(clean).most_common(1)[0][0] if clean else "Veri yetersiz"
@@ -351,11 +372,17 @@ def _poisson_mode(lam: float) -> int:
     return max(0, min(6, int(round(max(0.05, lam)))))
 
 
+def _poisson_probability(lam: float, goals: int) -> float:
+    return (lam ** goals) * math.exp(-lam) / math.factorial(goals)
+
+
 def build_report(
     match: dict[str, Any],
     h2h_rows: list[dict[str, Any]],
     same_odds_rows: list[dict[str, Any]],
     league_rows: list[dict[str, Any]],
+    home_form_rows: list[dict[str, Any]] | None = None,
+    away_form_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     valid = [
         row for row in league_rows
@@ -365,16 +392,86 @@ def build_report(
     if not valid:
         valid = h2h_rows
 
+    home_form_rows = home_form_rows or []
+    away_form_rows = away_form_rows or []
+
+    def average(rows: list[dict[str, Any]], scored_column: str, conceded_column: str) -> tuple[float | None, float | None]:
+        scored = [_number(row.get(scored_column)) for row in rows]
+        conceded = [_number(row.get(conceded_column)) for row in rows]
+        scored = [value for value in scored if value is not None]
+        conceded = [value for value in conceded if value is not None]
+        return (
+            sum(scored) / len(scored) if scored else None,
+            sum(conceded) / len(conceded) if conceded else None,
+        )
+
+    league_home_scored, league_home_conceded = average(
+        valid,
+        "full_time_home_goals",
+        "full_time_away_goals",
+    )
+    league_away_scored, league_away_conceded = average(
+        valid,
+        "full_time_away_goals",
+        "full_time_home_goals",
+    )
+    home_scored, home_conceded = average(
+        home_form_rows,
+        "full_time_home_goals",
+        "full_time_away_goals",
+    )
+    away_scored, away_conceded = average(
+        away_form_rows,
+        "full_time_away_goals",
+        "full_time_home_goals",
+    )
+    league_home_scored = league_home_scored or 1.25
+    league_away_scored = league_away_scored or 1.05
+    home_scored = home_scored or league_home_scored
+    home_conceded = home_conceded or league_away_scored
+    away_scored = away_scored or league_away_scored
+    away_conceded = away_conceded or league_home_scored
+
+    expected_home = max(
+        0.15,
+        0.45 * home_scored + 0.30 * away_conceded + 0.25 * league_home_scored,
+    )
+    expected_away = max(
+        0.15,
+        0.45 * away_scored + 0.30 * home_conceded + 0.25 * league_away_scored,
+    )
+
+    score_grid = {
+        (home_goals, away_goals): _poisson_probability(expected_home, home_goals)
+        * _poisson_probability(expected_away, away_goals)
+        for home_goals in range(0, 7)
+        for away_goals in range(0, 7)
+    }
+    best_score = max(score_grid, key=score_grid.get)
+    score_prediction = f"{best_score[0]}-{best_score[1]}"
+    model_probabilities = [
+        sum(probability for (home_goals, away_goals), probability in score_grid.items() if home_goals > away_goals),
+        sum(probability for (home_goals, away_goals), probability in score_grid.items() if home_goals == away_goals),
+        sum(probability for (home_goals, away_goals), probability in score_grid.items() if home_goals < away_goals),
+    ]
+
     home_odds = _number(match.get("b365_home"))
     draw_odds = _number(match.get("b365_draw"))
     away_odds = _number(match.get("b365_away"))
     odds = [home_odds, draw_odds, away_odds]
     inverse = [1 / value if value and value > 1 else 0 for value in odds]
     inverse_total = sum(inverse)
-    implied = [value / inverse_total for value in inverse] if inverse_total else [None] * 3
+    odds_probabilities = [value / inverse_total for value in inverse] if inverse_total else None
+    if odds_probabilities:
+        probabilities = [
+            0.60 * odds_value + 0.40 * model_value
+            for odds_value, model_value in zip(odds_probabilities, model_probabilities)
+        ]
+    else:
+        probabilities = model_probabilities
     labels = ["MS 1", "MS X", "MS 2"]
-    best_index = max(range(3), key=lambda index: implied[index] or 0)
-    ms_prediction = labels[best_index] if inverse_total else "Veri yetersiz"
+    best_index = max(range(3), key=lambda index: probabilities[index])
+    ms_prediction = labels[best_index] if probabilities else "Veri yetersiz"
 
     ht_ms = _most_common(
         [
@@ -385,42 +482,44 @@ def build_report(
     )
 
     totals: dict[str, dict[str, Any]] = {}
+    total_lambda = expected_home + expected_away
     for threshold in (0.5, 1.5, 2.5, 3.5):
-        values = []
-        for row in valid:
-            home = _number(row.get("full_time_home_goals"))
-            away = _number(row.get("full_time_away_goals"))
-            if home is not None and away is not None:
-                values.append(home + away > threshold)
-        probability = sum(values) / len(values) if values else None
+        maximum_below = int(threshold)
+        probability = 1 - sum(
+            _poisson_probability(total_lambda, goals)
+            for goals in range(0, maximum_below + 1)
+        )
         totals[str(threshold)] = {
             "probability": probability,
-            "prediction": "Üst" if probability is not None and probability >= 0.5 else "Alt" if probability is not None else "Veri yetersiz",
+            "prediction": "Üst" if probability >= 0.5 else "Alt",
         }
 
-    home_goals = [_number(row.get("full_time_home_goals")) for row in valid]
-    away_goals = [_number(row.get("full_time_away_goals")) for row in valid]
-    home_goals = [value for value in home_goals if value is not None]
-    away_goals = [value for value in away_goals if value is not None]
-    expected_home = sum(home_goals) / len(home_goals) if home_goals else 1.2
-    expected_away = sum(away_goals) / len(away_goals) if away_goals else 1.0
-    score_prediction = f"{_poisson_mode(expected_home)}-{_poisson_mode(expected_away)}"
-
-    btts_values = []
-    for row in valid:
-        home = _number(row.get("full_time_home_goals"))
-        away = _number(row.get("full_time_away_goals"))
-        if home is not None and away is not None:
-            btts_values.append(home > 0 and away > 0)
-    btts_probability = sum(btts_values) / len(btts_values) if btts_values else None
-    over25 = totals["2.5"]["probability"]
-    total_pick = "2.5 Üst" if over25 is not None and over25 >= 0.58 else "2.5 Alt" if over25 is not None and over25 <= 0.42 else "2.5 temkinli"
-    coupon = f"{ms_prediction} + {total_pick}"
+    btts_probability = (
+        1
+        - math.exp(-expected_home)
+        - math.exp(-expected_away)
+        + math.exp(-total_lambda)
+    )
+    market_candidates: list[tuple[float, str]] = []
+    for threshold, data in totals.items():
+        if threshold not in {"2.5", "3.5"}:
+            continue
+        confidence = abs(data["probability"] - 0.5)
+        if confidence >= 0.08:
+            market_candidates.append((confidence, f"{threshold} {'Üst' if data['probability'] >= 0.5 else 'Alt'}"))
+    btts_confidence = abs(btts_probability - 0.5)
+    if btts_confidence >= 0.08:
+        market_candidates.append((btts_confidence, "KG Var" if btts_probability >= 0.5 else "KG Yok"))
+    market_candidates.sort(reverse=True)
+    secondary_pick = market_candidates[0][1] if market_candidates else "tek tercih"
+    coupon = f"{ms_prediction} + {secondary_pick}" if secondary_pick != "tek tercih" else ms_prediction
     comment = (
         f"Bu rapor {len(valid)} tamamlanmış {match.get('division') or ''} lig maçının "
-        f"istatistikleri ve mevcut Bet365 oranlarıyla oluşturuldu. "
-        f"Oranların ima ettiği en güçlü MS seçimi {ms_prediction}. "
-        f"Tahmini skor {score_prediction}; karşılıklı gol olasılığı {_percentage(btts_probability)}. "
+        f"yanı sıra ev sahibinin son {len(home_form_rows)} iç saha ve deplasmanın son "
+        f"{len(away_form_rows)} dış saha maçını dikkate alıyor. "
+        f"Oran ve Poisson modelinin ortak MS seçimi {ms_prediction}; tahmini gol ortalamaları "
+        f"{expected_home:.2f} - {expected_away:.2f}. Tahmini skor {score_prediction}; "
+        f"karşılıklı gol olasılığı {_percentage(btts_probability)}. "
         "Geçmiş istatistikler gelecek sonucu garanti etmez; oran, kadro ve haber bilgileri ayrıca değerlendirilmelidir."
     )
 
@@ -429,7 +528,7 @@ def build_report(
         "same_odds": same_odds_rows,
         "predictions": {
             "ms": ms_prediction,
-            "ms_probabilities": dict(zip(labels, implied)),
+            "ms_probabilities": dict(zip(labels, probabilities)),
             "ht_ms": ht_ms,
             "totals": totals,
             "score": score_prediction,

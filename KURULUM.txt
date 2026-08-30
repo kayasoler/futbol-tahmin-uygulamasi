@@ -16,3 +16,4 @@ Onemli:
 - Ayni mac dosya icinde, dosyalar arasinda veya veritabaninda varsa tekrar eklenmez.
 - Yaklasan mac listesindeki bir satira tiklayarak gecmis istatistik ve oran analizini acabilirsiniz.
 - Analiz ekranindaki butonla takimlarin guncel haber basliklarini ucretsiz arayabilirsiniz.
+- Tahmin modeli takimlarin son ic saha/dis saha formunu, gol ortalamalarini, oranlari ve Poisson olasiliklarini birlikte kullanir.

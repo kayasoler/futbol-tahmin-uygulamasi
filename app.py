@@ -14,6 +14,7 @@ from analysis import (
     fetch_live_news,
     fetch_league_rows,
     fetch_same_odds_rows,
+    fetch_team_form_rows,
     h2h_summary_tables,
     news_signal_summary,
     odds_summary_table,
@@ -538,7 +539,16 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
             league_rows = fetch_league_rows(client, division)
             same_league_rows = fetch_same_odds_rows(client, match, division)
             same_all_rows = fetch_same_odds_rows(client, match)
-            report = build_report(match, h2h_rows, same_league_rows, league_rows)
+            home_form_rows = fetch_team_form_rows(client, home, "home")
+            away_form_rows = fetch_team_form_rows(client, away, "away")
+            report = build_report(
+                match,
+                h2h_rows,
+                same_league_rows,
+                league_rows,
+                home_form_rows=home_form_rows,
+                away_form_rows=away_form_rows,
+            )
         except Exception as exc:
             st.error("Analiz verileri alınamadı.")
             st.code(str(exc))
