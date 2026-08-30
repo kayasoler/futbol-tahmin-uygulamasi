@@ -555,8 +555,8 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
             return
 
     st.info(
-        "İstatistiksel model geçmiş verilerle çalışır. Gemini bölümü ayrıca Google Search "
-        "ile güncel araştırma yapıp kendi tahminini üretir."
+        "İstatistiksel model geçmiş verilerle çalışır. Tavily güncel haberleri arar; "
+        "Gemini bu kaynakları ve tüm istatistikleri birleştirerek kendi tahminini üretir."
     )
 
     st.markdown("#### 1. Geçmiş rekabet · Son 10 maç")
@@ -635,32 +635,45 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
         "Bu çıktı kesin sonuç veya kazanç garantisi değildir."
     )
 
-    st.markdown("#### 4. Gemini canlı araştırma ve kendi tahmini")
+    st.markdown("#### 4. Canlı araştırma ve Gemini tahmini")
     st.write(
-        "Gemini, Google Search ile yalnızca seçili maçı araştırır; güncel haberleri "
-        "veritabanındaki istatistiklerle birleştirerek kendi tahminlerini üretir."
+        "Tavily yalnızca seçili maç ve takımlar için güncel kaynakları arar. Gemini, "
+        "bu haberleri veritabanındaki istatistiklerle birleştirerek kendi tahminini üretir."
     )
     try:
         gemini_api_key = str(st.secrets["GEMINI_API_KEY"]).strip()
     except KeyError:
         gemini_api_key = ""
+    try:
+        tavily_api_key = str(st.secrets["TAVILY_API_KEY"]).strip()
+    except KeyError:
+        tavily_api_key = ""
 
-    if not gemini_api_key:
-        st.warning("Gemini API anahtarı bulunamadı; istatistiksel yorum kullanılabilir.")
+    if not gemini_api_key or not tavily_api_key:
+        missing_keys = []
+        if not gemini_api_key:
+            missing_keys.append("GEMINI_API_KEY")
+        if not tavily_api_key:
+            missing_keys.append("TAVILY_API_KEY")
+        st.warning(
+            "Canlı araştırma için eksik Streamlit Secrets anahtarı: "
+            + ", ".join(missing_keys)
+        )
     else:
-        gemini_state_key = f"gemini_grounded_analysis_{match.get('id')}"
+        gemini_state_key = f"tavily_gemini_analysis_{match.get('id')}"
         if st.button(
-            "Gemini ile araştır ve tahmin oluştur",
-            key=f"gemini_grounded_button_{match.get('id')}",
+            "Güncel haberleri araştır ve Gemini tahmini oluştur",
+            key=f"tavily_gemini_button_{match.get('id')}",
             use_container_width=True,
         ):
             with st.spinner(
-                "Gemini Google'da takımları araştırıyor ve tüm verileri yorumluyor..."
+                "Tavily güncel kaynakları arıyor; Gemini tüm verileri yorumluyor..."
             ):
                 try:
                     st.session_state[gemini_state_key] = (
                         generate_gemini_grounded_analysis(
                             gemini_api_key,
+                            tavily_api_key,
                             match,
                             report,
                         )
@@ -672,8 +685,8 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
         gemini_result = st.session_state.get(gemini_state_key)
         if isinstance(gemini_result, dict) and "error" in gemini_result:
             st.error(
-                "Gemini araştırması tamamlanamadı. API kotası, model erişimi veya "
-                "anahtar ayarını kontrol edin."
+                "Canlı araştırma tamamlanamadı. Tavily veya Gemini anahtarını ve "
+                "ücretsiz kullanım kotasını kontrol edin."
             )
             st.caption(str(gemini_result["error"]))
         elif gemini_result:
@@ -682,10 +695,16 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
                 st.caption(f"Kullanılan Gemini modeli: {gemini_result['model']}")
             sources = gemini_result.get("sources") or []
             if sources:
-                st.markdown("##### Gemini’nin kullandığı kaynaklar")
+                st.markdown("##### Tavily tarafından bulunan kaynaklar")
                 for source in sources:
                     title = str(source["title"]).replace("[", "(").replace("]", ")")
-                    st.markdown(f"- [{title}]({source['url']})")
+                    category = str(source.get("category") or "Kaynak")
+                    st.markdown(f"- **{category}:** [{title}]({source['url']})")
+            search_warnings = gemini_result.get("search_warnings") or []
+            if search_warnings:
+                st.warning(
+                    "Bazı haber aramaları tamamlanamadı; mevcut kaynaklarla analiz yapıldı."
+                )
             st.caption(
                 "Gemini tahminleri kesin sonuç veya kazanç garantisi değildir. "
                 "Kadro ve haberleri maç öncesinde kaynaklardan doğrulayın."
