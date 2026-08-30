@@ -101,11 +101,7 @@ En fazla iki seçimden oluşan tek net kupon yaz. Güven düşükse açıkça "K
     interaction = None
     model_used = ""
     errors: list[str] = []
-    for model_name in (
-        "gemini-3.5-flash-lite",
-        "gemini-3.6-flash",
-        "gemini-3.5-flash",
-    ):
+    for model_name in ("gemini-3-flash-preview",):
         try:
             interaction = client.interactions.create(
                 model=model_name,
@@ -118,7 +114,7 @@ En fazla iki seçimden oluşan tek net kupon yaz. Güven düşükse açıkça "K
             errors.append(f"{model_name}: {exc}")
     if interaction is None:
         raise RuntimeError(
-            "Ücretsiz Gemini modellerinden yanıt alınamadı. "
+            "Ücretsiz Gemini 3 Flash modelinden yanıt alınamadı. "
             + " | ".join(errors)
         )
     text = getattr(interaction, "output_text", None)
