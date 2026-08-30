@@ -9,4 +9,5 @@ Bu paketteki dosyalar:
 Onemli:
 - Supabase servis anahtarinizi hicbir dosyaya yazmayin.
 - Anahtarlar daha sonra Streamlit Secrets ekranina girilecektir.
+- Streamlit Secrets ekraninda APP_PASSWORD adinda guclu bir giris parolasi belirleyin.
 - Uygulama bu asamada yalnizca gecmis CSV yukler.

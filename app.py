@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hmac
+
 import streamlit as st
 from supabase import Client, create_client
 
@@ -48,12 +50,31 @@ def stop_if_secrets_missing() -> None:
     try:
         _ = st.secrets["SUPABASE_URL"]
         _ = st.secrets["SUPABASE_SERVICE_ROLE_KEY"]
+        _ = st.secrets["APP_PASSWORD"]
     except (KeyError, FileNotFoundError):
         st.info(
-            "Uygulama hazır. Supabase bağlantısı için Streamlit Secrets "
-            "ayarlarının eklenmesi gerekiyor."
+            "Uygulama hazır. Supabase bağlantısı ve uygulama parolası için "
+            "Streamlit Secrets ayarlarının eklenmesi gerekiyor."
         )
         st.stop()
+
+
+def require_login() -> None:
+    """Protect the server-side data tools with a shared app password."""
+    if st.session_state.get("authenticated") is True:
+        return
+
+    st.subheader("🔐 Güvenli giriş")
+    st.write("Veri yönetimi ekranını açmak için uygulama parolanızı girin.")
+    password = st.text_input("Uygulama parolası", type="password")
+
+    if st.button("Giriş yap", type="primary", use_container_width=True):
+        if password and hmac.compare_digest(password, st.secrets["APP_PASSWORD"]):
+            st.session_state["authenticated"] = True
+            st.rerun()
+        else:
+            st.error("Parola hatalı.")
+    st.stop()
 
 
 def get_historical_count(client: Client) -> int:
@@ -75,7 +96,13 @@ with st.sidebar:
     st.info("Şu anda: Geçmiş CSV yükleme")
     st.caption("Tahmin ve canlı araştırma sonraki aşamalarda eklenecek.")
 
+    if st.session_state.get("authenticated") is True:
+        if st.button("Güvenli çıkış"):
+            st.session_state["authenticated"] = False
+            st.rerun()
+
 stop_if_secrets_missing()
+require_login()
 
 try:
     supabase = get_supabase_client()
