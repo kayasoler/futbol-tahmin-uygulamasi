@@ -15,6 +15,7 @@ from analysis import (
     fetch_league_rows,
     fetch_same_odds_rows,
     fetch_team_form_rows,
+    generate_gemini_comment,
     h2h_summary_tables,
     news_signal_summary,
     odds_summary_table,
@@ -680,6 +681,41 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
             report["comment"] + " " + news_signal_summary(news_result, home, away)
         )
         st.success(f"Kupon Önerisi: {report['coupon']}")
+
+        st.markdown("#### 6. Gemini final yorumu")
+        try:
+            gemini_api_key = str(st.secrets["GEMINI_API_KEY"]).strip()
+        except KeyError:
+            gemini_api_key = ""
+
+        if not gemini_api_key:
+            st.warning("Gemini API anahtarı bulunamadı; istatistiksel yorum kullanılabilir.")
+        else:
+            gemini_state_key = f"gemini_comment_{match.get('id')}"
+            if st.button(
+                "Gemini ile final yorumu oluştur",
+                key=f"gemini_comment_button_{match.get('id')}",
+                use_container_width=True,
+            ):
+                with st.spinner("Gemini haberleri ve istatistikleri yorumluyor..."):
+                    try:
+                        st.session_state[gemini_state_key] = generate_gemini_comment(
+                            gemini_api_key,
+                            match,
+                            report,
+                            news_result,
+                        )
+                    except Exception as exc:
+                        st.session_state[gemini_state_key] = {"error": str(exc)}
+                st.rerun()
+
+            gemini_result = st.session_state.get(gemini_state_key)
+            if isinstance(gemini_result, dict) and "error" in gemini_result:
+                st.error(
+                    "Gemini yorumu oluşturulamadı. API kotası veya anahtar ayarını kontrol edin."
+                )
+            elif gemini_result:
+                st.write(gemini_result)
 
 
 def render_upcoming_list_tab(client: Client, today) -> None:

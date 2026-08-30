@@ -17,3 +17,4 @@ Onemli:
 - Yaklasan mac listesindeki bir satira tiklayarak gecmis istatistik ve oran analizini acabilirsiniz.
 - Analiz ekranindaki butonla takimlarin guncel haber basliklarini ucretsiz arayabilirsiniz.
 - Tahmin modeli takimlarin son ic saha/dis saha formunu, gol ortalamalarini, oranlari ve Poisson olasiliklarini birlikte kullanir.
+- Streamlit Secrets icinde GEMINI_API_KEY varsa haberler Gemini ile temkinli bir final yorumuna donusturulur.

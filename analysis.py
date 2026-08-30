@@ -109,6 +109,60 @@ def news_signal_summary(
     )
 
 
+def generate_gemini_comment(
+    api_key: str,
+    match: dict[str, Any],
+    report: dict[str, Any],
+    news: list[dict[str, str]],
+) -> str:
+    """Ask Gemini to explain supplied facts without inventing new ones."""
+    from google import genai
+
+    predictions = report["predictions"]
+    news_lines = "\n".join(
+        f"- {item.get('title', '')} | {item.get('source', '')} | {item.get('published', '')}"
+        for item in news[:12]
+    )
+    prompt = f"""
+Sen temkinli bir futbol istatistik analistisin. Aşağıdaki verilerle Türkçe bir maç yorumu yaz.
+Yalnızca verilen bilgileri kullan; sakat oyuncu adı, kesin kadro, skor veya haber içeriği uydurma.
+Haber başlıkları doğrulanmış bilgi değildir; bunu açıkça belirt.
+Bahis sonucunu garanti etme ve kullanıcıyı yüksek risk almaya yönlendirme.
+Çıktıyı şu dört başlıkla ver:
+1) Haber etkisi
+2) İstatistik değerlendirmesi
+3) Riskler
+4) Final görüş
+
+Maç:
+- Lig: {match.get('division')}
+- Ev sahibi: {match.get('home_team')}
+- Deplasman: {match.get('away_team')}
+- Tarih: {match.get('match_date')} {match.get('kickoff_time')}
+
+Model sonuçları:
+- MS: {predictions.get('ms')}
+- MS olasılıkları: {predictions.get('ms_probabilities')}
+- İY/MS: {predictions.get('ht_ms')}
+- Skor: {predictions.get('score')}
+- KG: {predictions.get('btts_prediction')} ({_percentage(predictions.get('btts_probability'))})
+- Alt/Üst: {predictions.get('totals')}
+- İstatistik örneklemi: {predictions.get('sample_size')}
+
+Haber başlıkları:
+{news_lines or "Haber başlığı bulunamadı."}
+"""
+    client = genai.Client(api_key=api_key)
+    response = client.models.generate_content(
+        model="gemini-3-flash-preview",
+        contents=prompt,
+    )
+    text = getattr(response, "text", None)
+    if not text:
+        raise ValueError("Gemini boş bir yanıt döndürdü.")
+    return str(text).strip()
+
+
 def _key(value: Any) -> str:
     return str(value or "").strip().casefold()
 
