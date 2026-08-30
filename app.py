@@ -678,6 +678,8 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
             st.caption(str(gemini_result["error"]))
         elif gemini_result:
             st.markdown(str(gemini_result["text"]))
+            if gemini_result.get("model"):
+                st.caption(f"Kullanılan Gemini modeli: {gemini_result['model']}")
             sources = gemini_result.get("sources") or []
             if sources:
                 st.markdown("##### Gemini’nin kullandığı kaynaklar")

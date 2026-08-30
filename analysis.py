@@ -98,11 +98,25 @@ Veri yetersizliğini ve çelişkileri açıkça belirt.
 En fazla iki seçimden oluşan tek net kupon yaz. Güven düşükse açıkça "Kupon önerilmiyor" de.
 """
     client = genai.Client(api_key=api_key)
-    interaction = client.interactions.create(
-        model="gemini-3.7-flash",
-        input=prompt,
-        tools=[{"type": "google_search"}],
-    )
+    interaction = None
+    model_used = ""
+    errors: list[str] = []
+    for model_name in ("gemini-2.5-flash", "gemini-2.5-flash-lite"):
+        try:
+            interaction = client.interactions.create(
+                model=model_name,
+                input=prompt,
+                tools=[{"type": "google_search"}],
+            )
+            model_used = model_name
+            break
+        except Exception as exc:
+            errors.append(f"{model_name}: {exc}")
+    if interaction is None:
+        raise RuntimeError(
+            "Ücretsiz Gemini modellerinden yanıt alınamadı. "
+            + " | ".join(errors)
+        )
     text = getattr(interaction, "output_text", None)
     if not text:
         raise ValueError("Gemini boş bir yanıt döndürdü.")
@@ -126,7 +140,11 @@ En fazla iki seçimden oluşan tek net kupon yaz. Güven düşükse açıkça "K
                         "url": url,
                     }
                 )
-    return {"text": str(text).strip(), "sources": sources}
+    return {
+        "text": str(text).strip(),
+        "sources": sources,
+        "model": model_used,
+    }
 
 
 def _key(value: Any) -> str:
