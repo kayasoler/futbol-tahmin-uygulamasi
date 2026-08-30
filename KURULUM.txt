@@ -1,4 +1,4 @@
-FUTBOL TAHMIN VE ANALIZ UYGULAMASI - ASAMA 3
+FUTBOL TAHMIN VE ANALIZ UYGULAMASI - ASAMA 8
 
 Bu paketteki dosyalar:
 - app.py: Streamlit arayuzu
@@ -15,6 +15,6 @@ Onemli:
 - Yaklasan maclar, veritabanindaki takim adlariyla manuel olarak da eklenebilir.
 - Ayni mac dosya icinde, dosyalar arasinda veya veritabaninda varsa tekrar eklenmez.
 - Yaklasan mac listesindeki bir satira tiklayarak gecmis istatistik ve oran analizini acabilirsiniz.
-- Analiz ekranindaki butonla takimlarin guncel haber basliklarini ucretsiz arayabilirsiniz.
+- Gemini Google Search ile secili maci canli olarak arastirir ve kaynaklari gosterir.
 - Tahmin modeli takimlarin son ic saha/dis saha formunu, gol ortalamalarini, oranlari ve Poisson olasiliklarini birlikte kullanir.
-- Streamlit Secrets icinde GEMINI_API_KEY varsa haberler Gemini ile temkinli bir final yorumuna donusturulur.
+- Streamlit Secrets icinde GEMINI_API_KEY varsa Gemini tum istatistiklerle kendi tahminlerini ve kupon yorumunu uretir.

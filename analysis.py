@@ -3,11 +3,8 @@ from __future__ import annotations
 from collections import Counter
 import math
 from typing import Any
-from urllib.parse import quote_plus
-import xml.etree.ElementTree as ET
 
 import pandas as pd
-import requests
 
 
 HISTORICAL_COLUMNS = (
@@ -17,130 +14,48 @@ HISTORICAL_COLUMNS = (
 )
 
 
-def fetch_live_news(home_team: str, away_team: str, max_items: int = 12) -> list[dict[str, str]]:
-    """Search Google News RSS without requiring a paid API key."""
-    queries = [
-        f'"{home_team}" futbol sakatlık ceza kadro',
-        f'"{away_team}" futbol sakatlık ceza kadro',
-        f'"{home_team}" "{away_team}" maç haber',
-    ]
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; FootballAnalysis/1.0)"}
-    found: list[dict[str, str]] = []
-    seen: set[str] = set()
-
-    for query in queries:
-        url = (
-            "https://news.google.com/rss/search?q="
-            + quote_plus(query)
-            + "&hl=tr&gl=TR&ceid=TR:tr"
+def _compact_rows(rows: list[dict[str, Any]], maximum: int = 20) -> str:
+    if not rows:
+        return "Kayıt yok."
+    lines: list[str] = []
+    for row in rows[:maximum]:
+        lines.append(
+            f"{row.get('match_date')} | {row.get('home_team')} "
+            f"{row.get('full_time_home_goals')}-{row.get('full_time_away_goals')} "
+            f"{row.get('away_team')} | FTR={row.get('full_time_result')} | "
+            f"oran={row.get('b365_home')}/{row.get('b365_draw')}/{row.get('b365_away')}"
         )
-        response = requests.get(url, headers=headers, timeout=12)
-        response.raise_for_status()
-        root = ET.fromstring(response.content)
-        for item in root.findall("./channel/item"):
-            title = (item.findtext("title") or "").strip()
-            link = (item.findtext("link") or "").strip()
-            source = (item.findtext("source") or "").strip()
-            published = (item.findtext("pubDate") or "").strip()
-            if not title or not link or link in seen:
-                continue
-            seen.add(link)
-            found.append(
-                {
-                    "title": title,
-                    "link": link,
-                    "source": source or "Google News",
-                    "published": published,
-                }
-            )
-            if len(found) >= max_items:
-                return found
-    return found
+    return "\n".join(lines)
 
 
-def news_signal_summary(
-    news: list[dict[str, str]],
-    home_team: str,
-    away_team: str,
-) -> str:
-    """Turn headline keywords into a cautious, transparent match note."""
-    negative_words = (
-        "sakat", "sakatlık", "injur", "ceza", "cezalı", "suspended",
-        "eksik", "yok", "doubtful", "out", "kriz", "mağlub", "yenil",
-        "loss", "defeat",
-    )
-    positive_words = (
-        "form", "galib", "kazan", "win", "victory", "unbeaten",
-        "dönüyor", "hazır", "return", "fit",
-    )
-    home_key = _key(home_team)
-    away_key = _key(away_team)
-    scores = {home_key: 0, away_key: 0}
-    labels = {home_key: home_team, away_key: away_team}
-    matched_titles: list[str] = []
-
-    for item in news:
-        title = str(item.get("title") or "")
-        title_key = title.casefold()
-        team_key = home_key if home_key in title_key else away_key if away_key in title_key else None
-        if team_key is None:
-            continue
-        negative = sum(word in title_key for word in negative_words)
-        positive = sum(word in title_key for word in positive_words)
-        scores[team_key] += positive - negative
-        if negative or positive:
-            matched_titles.append(title)
-
-    if not news:
-        return "Canlı taramada kullanılabilir bir haber başlığı bulunamadı; yorum yalnızca istatistiklere dayanıyor."
-
-    if not matched_titles:
-        return (
-            f"{len(news)} haber başlığı bulundu ancak başlıklarda {home_team} veya {away_team} "
-            "için belirgin bir olumlu/olumsuz sinyal tespit edilmedi. İstatistiksel tahmin korunuyor."
-        )
-
-    home_signal = "olumlu" if scores[home_key] > 0 else "olumsuz" if scores[home_key] < 0 else "belirsiz"
-    away_signal = "olumlu" if scores[away_key] > 0 else "olumsuz" if scores[away_key] < 0 else "belirsiz"
-    return (
-        f"Canlı başlık sinyallerinde {home_team} için {home_signal}, {away_team} için "
-        f"{away_signal} görünüm var. Bu sinyal yalnızca haber başlıklarındaki anahtar "
-        "kelimelerden çıkarılmıştır; haber metni ve resmi kadro açıklaması ayrıca doğrulanmalıdır."
-    )
-
-
-def generate_gemini_comment(
+def generate_gemini_grounded_analysis(
     api_key: str,
     match: dict[str, Any],
     report: dict[str, Any],
-    news: list[dict[str, str]],
-) -> str:
-    """Ask Gemini to explain supplied facts without inventing new ones."""
+) -> dict[str, Any]:
+    """Let Gemini search the live web, cite sources, and make its own prediction."""
     from google import genai
 
     predictions = report["predictions"]
-    news_lines = "\n".join(
-        f"- {item.get('title', '')} | {item.get('source', '')} | {item.get('published', '')}"
-        for item in news[:12]
-    )
     prompt = f"""
-Sen temkinli bir futbol istatistik analistisin. Aşağıdaki verilerle Türkçe bir maç yorumu yaz.
-Yalnızca verilen bilgileri kullan; sakat oyuncu adı, kesin kadro, skor veya haber içeriği uydurma.
-Haber başlıkları doğrulanmış bilgi değildir; bunu açıkça belirt.
-Bahis sonucunu garanti etme ve kullanıcıyı yüksek risk almaya yönlendirme.
-Çıktıyı şu dört başlıkla ver:
-1) Haber etkisi
-2) İstatistik değerlendirmesi
-3) Riskler
-4) Final görüş
+Sen profesyonel ve temkinli bir futbol maç analistisin.
+Google Search kullanarak SADECE aşağıdaki gerçek maçı araştır.
+Takım isimleri benzer başka kulüplerle karıştırılmamalı.
+Öncelikle kulüplerin ve ligin resmi kaynaklarını, sonra güvenilir spor kaynaklarını kullan.
+Güncel form, son maçlar, sakatlık, ceza, kadro dışı, muhtemel rotasyon ve maç öncesi haberleri araştır.
+Doğrulanamayan oyuncu veya kadro bilgisini kesin gerçek gibi yazma.
+İnternetten bulduğun güncel bilgiler ile aşağıdaki veritabanı istatistiklerini birlikte değerlendir.
+Kendi tahminini üret; uygulamanın mevcut tahminini körü körüne tekrar etme.
+Kesin kazanç veya sonuç garantisi verme.
 
 Maç:
 - Lig: {match.get('division')}
 - Ev sahibi: {match.get('home_team')}
 - Deplasman: {match.get('away_team')}
 - Tarih: {match.get('match_date')} {match.get('kickoff_time')}
+- Bet365 MS oranları: {match.get('b365_home')} / {match.get('b365_draw')} / {match.get('b365_away')}
 
-Model sonuçları:
+Uygulamanın istatistik modeli:
 - MS: {predictions.get('ms')}
 - MS olasılıkları: {predictions.get('ms_probabilities')}
 - İY/MS: {predictions.get('ht_ms')}
@@ -149,18 +64,69 @@ Model sonuçları:
 - Alt/Üst: {predictions.get('totals')}
 - İstatistik örneklemi: {predictions.get('sample_size')}
 
-Haber başlıkları:
-{news_lines or "Haber başlığı bulunamadı."}
+İki takımın son karşılaşmaları:
+{_compact_rows(report.get('h2h', []), 10)}
+
+Aynı ligde birebir aynı oranlı geçmiş maçlar:
+{_compact_rows(report.get('same_odds', []), 20)}
+
+Tüm liglerde birebir aynı oranlı geçmiş maçlar:
+{_compact_rows(report.get('same_odds_all', []), 20)}
+
+Yanıtı Türkçe olarak tam şu başlıklarla hazırla:
+## Canlı araştırma
+Takımların güncel formu, eksikleri, sakatlık/ceza durumu ve önemli haberleri; kaynaklarla destekle.
+
+## Verilerin ortak yorumu
+İnternet araştırması, H2H, aynı oran analizi, takım formu, Poisson ve Bet365 oranlarını karşılaştır.
+
+## Gemini tahminleri
+- MS: 1, X veya 2; yüzde olasılıklarla
+- İY/MS: tek net seçim
+- 0.5: Alt veya Üst; yüzde
+- 1.5: Alt veya Üst; yüzde
+- 2.5: Alt veya Üst; yüzde
+- 3.5: Alt veya Üst; yüzde
+- Skor: tek skor
+- KG: Var veya Yok; yüzde
+- Güven seviyesi: Düşük, Orta veya Yüksek
+
+## Riskler
+Veri yetersizliğini ve çelişkileri açıkça belirt.
+
+## Kupon önerisi
+En fazla iki seçimden oluşan tek net kupon yaz. Güven düşükse açıkça "Kupon önerilmiyor" de.
 """
     client = genai.Client(api_key=api_key)
-    response = client.models.generate_content(
-        model="gemini-3-flash-preview",
-        contents=prompt,
+    interaction = client.interactions.create(
+        model="gemini-3.7-flash",
+        input=prompt,
+        tools=[{"type": "google_search"}],
     )
-    text = getattr(response, "text", None)
+    text = getattr(interaction, "output_text", None)
     if not text:
         raise ValueError("Gemini boş bir yanıt döndürdü.")
-    return str(text).strip()
+
+    sources: list[dict[str, str]] = []
+    seen_urls: set[str] = set()
+    for step in getattr(interaction, "steps", None) or []:
+        if getattr(step, "type", None) != "model_output":
+            continue
+        for block in getattr(step, "content", None) or []:
+            for annotation in getattr(block, "annotations", None) or []:
+                if getattr(annotation, "type", None) != "url_citation":
+                    continue
+                url = str(getattr(annotation, "url", "") or "")
+                if not url or url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                sources.append(
+                    {
+                        "title": str(getattr(annotation, "title", "") or url),
+                        "url": url,
+                    }
+                )
+    return {"text": str(text).strip(), "sources": sources}
 
 
 def _key(value: Any) -> str:

@@ -11,13 +11,11 @@ from supabase import Client, create_client
 from analysis import (
     build_report,
     fetch_h2h_rows,
-    fetch_live_news,
     fetch_league_rows,
     fetch_same_odds_rows,
     fetch_team_form_rows,
-    generate_gemini_comment,
+    generate_gemini_grounded_analysis,
     h2h_summary_tables,
-    news_signal_summary,
     odds_summary_table,
     rows_to_table,
 )
@@ -550,14 +548,15 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
                 home_form_rows=home_form_rows,
                 away_form_rows=away_form_rows,
             )
+            report["same_odds_all"] = same_all_rows
         except Exception as exc:
             st.error("Analiz verileri alınamadı.")
             st.code(str(exc))
             return
 
     st.info(
-        "Bu ilk analiz sürümü geçmiş veriler ve Bet365 oranlarıyla çalışır. "
-        "Canlı haber/sakatlık taraması bir sonraki aşamada eklenecektir."
+        "İstatistiksel model geçmiş verilerle çalışır. Gemini bölümü ayrıca Google Search "
+        "ile güncel araştırma yapıp kendi tahminini üretir."
     )
 
     st.markdown("#### 1. Geçmiş rekabet · Son 10 maç")
@@ -636,86 +635,59 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
         "Bu çıktı kesin sonuç veya kazanç garantisi değildir."
     )
 
-    st.markdown("#### 4. Canlı internet araştırması")
+    st.markdown("#### 4. Gemini canlı araştırma ve kendi tahmini")
     st.write(
-        "Takımların güncel haber başlıklarını, sakatlık/ceza ve kadro bilgilerini "
-        "ücretsiz Google News RSS üzerinden arayın."
+        "Gemini, Google Search ile yalnızca seçili maçı araştırır; güncel haberleri "
+        "veritabanındaki istatistiklerle birleştirerek kendi tahminlerini üretir."
     )
-    news_state_key = f"live_news_{match.get('id')}"
-    if st.button(
-        "Canlı haberleri ara",
-        key=f"search_news_{match.get('id')}",
-        use_container_width=True,
-    ):
-        with st.spinner("Güncel haberler aranıyor..."):
-            try:
-                st.session_state[news_state_key] = fetch_live_news(home, away)
-            except Exception as exc:
-                st.session_state[news_state_key] = {"error": str(exc)}
-        st.rerun()
+    try:
+        gemini_api_key = str(st.secrets["GEMINI_API_KEY"]).strip()
+    except KeyError:
+        gemini_api_key = ""
 
-    news_result = st.session_state.get(news_state_key)
-    if isinstance(news_result, dict) and "error" in news_result:
-        st.warning(
-            "Haber servisine şu anda ulaşılamadı. İstatistiksel rapor yine kullanılabilir."
-        )
-    elif news_result is None:
-        st.info("Haber aramasını başlatmak için yukarıdaki düğmeye basın.")
-    elif not news_result:
-        st.info("Bu maç için güncel haber başlığı bulunamadı.")
+    if not gemini_api_key:
+        st.warning("Gemini API anahtarı bulunamadı; istatistiksel yorum kullanılabilir.")
     else:
-        for news in news_result:
-            title = str(news["title"]).replace("[", "(").replace("]", ")")
-            source = str(news["source"]).replace("[", "(").replace("]", ")")
-            published = str(news["published"]).replace("[", "(").replace("]", ")")
-            st.markdown(
-                f"- [{title}]({news['link']})  \n"
-                f"  {source} · {published}"
-            )
-        st.caption(
-            "Haber başlıkları otomatik toplanır; maç kadrosu ve haber içeriği "
-            "başlamadan önce ayrıca doğrulanmalıdır."
-        )
-        st.markdown("#### 5. Canlı haberlerle birleştirilmiş final yorum")
-        st.write(
-            report["comment"] + " " + news_signal_summary(news_result, home, away)
-        )
-        st.success(f"Kupon Önerisi: {report['coupon']}")
-
-        st.markdown("#### 6. Gemini final yorumu")
-        try:
-            gemini_api_key = str(st.secrets["GEMINI_API_KEY"]).strip()
-        except KeyError:
-            gemini_api_key = ""
-
-        if not gemini_api_key:
-            st.warning("Gemini API anahtarı bulunamadı; istatistiksel yorum kullanılabilir.")
-        else:
-            gemini_state_key = f"gemini_comment_{match.get('id')}"
-            if st.button(
-                "Gemini ile final yorumu oluştur",
-                key=f"gemini_comment_button_{match.get('id')}",
-                use_container_width=True,
+        gemini_state_key = f"gemini_grounded_analysis_{match.get('id')}"
+        if st.button(
+            "Gemini ile araştır ve tahmin oluştur",
+            key=f"gemini_grounded_button_{match.get('id')}",
+            use_container_width=True,
+        ):
+            with st.spinner(
+                "Gemini Google'da takımları araştırıyor ve tüm verileri yorumluyor..."
             ):
-                with st.spinner("Gemini haberleri ve istatistikleri yorumluyor..."):
-                    try:
-                        st.session_state[gemini_state_key] = generate_gemini_comment(
+                try:
+                    st.session_state[gemini_state_key] = (
+                        generate_gemini_grounded_analysis(
                             gemini_api_key,
                             match,
                             report,
-                            news_result,
                         )
-                    except Exception as exc:
-                        st.session_state[gemini_state_key] = {"error": str(exc)}
-                st.rerun()
+                    )
+                except Exception as exc:
+                    st.session_state[gemini_state_key] = {"error": str(exc)}
+            st.rerun()
 
-            gemini_result = st.session_state.get(gemini_state_key)
-            if isinstance(gemini_result, dict) and "error" in gemini_result:
-                st.error(
-                    "Gemini yorumu oluşturulamadı. API kotası veya anahtar ayarını kontrol edin."
-                )
-            elif gemini_result:
-                st.write(gemini_result)
+        gemini_result = st.session_state.get(gemini_state_key)
+        if isinstance(gemini_result, dict) and "error" in gemini_result:
+            st.error(
+                "Gemini araştırması tamamlanamadı. API kotası, model erişimi veya "
+                "anahtar ayarını kontrol edin."
+            )
+            st.caption(str(gemini_result["error"]))
+        elif gemini_result:
+            st.markdown(str(gemini_result["text"]))
+            sources = gemini_result.get("sources") or []
+            if sources:
+                st.markdown("##### Gemini’nin kullandığı kaynaklar")
+                for source in sources:
+                    title = str(source["title"]).replace("[", "(").replace("]", ")")
+                    st.markdown(f"- [{title}]({source['url']})")
+            st.caption(
+                "Gemini tahminleri kesin sonuç veya kazanç garantisi değildir. "
+                "Kadro ve haberleri maç öncesinde kaynaklardan doğrulayın."
+            )
 
 
 def render_upcoming_list_tab(client: Client, today) -> None:
