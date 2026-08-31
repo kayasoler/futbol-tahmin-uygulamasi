@@ -16,6 +16,8 @@ Onemli:
 - Ayni mac dosya icinde, dosyalar arasinda veya veritabaninda varsa tekrar eklenmez.
 - Yaklasan mac listesindeki bir satira tiklayarak gecmis istatistik ve oran analizini acabilirsiniz.
 - Tavily secili mac ve takimlar icin guncel haberleri arar ve kaynaklari gosterir.
+- Ilgisiz haberler takim adina gore elenir ve kaynak numaralari raporla eslestirilir.
+- Gemini ciktisi tek skor ve tek kupon kurallarina gore uygulama tarafindan kontrol edilir.
 - Ucretsiz Tavily temel aramasi ve Google AI Studio Gemini 3 Flash kotasi kullanilir.
 - Tahmin modeli takimlarin son ic saha/dis saha formunu, gol ortalamalarini, oranlari ve Poisson olasiliklarini birlikte kullanir.
 - Streamlit Secrets icinde GEMINI_API_KEY ve TAVILY_API_KEY varsa Gemini haberleri tum istatistiklerle birlestirip kendi tahminini ve kupon yorumunu uretir.

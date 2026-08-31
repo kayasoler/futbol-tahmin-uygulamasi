@@ -660,7 +660,7 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
             + ", ".join(missing_keys)
         )
     else:
-        gemini_state_key = f"tavily_gemini_analysis_{match.get('id')}"
+        gemini_state_key = f"tavily_gemini_analysis_v2_{match.get('id')}"
         if st.button(
             "Güncel haberleri araştır ve Gemini tahmini oluştur",
             key=f"tavily_gemini_button_{match.get('id')}",
@@ -696,10 +696,12 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
             sources = gemini_result.get("sources") or []
             if sources:
                 st.markdown("##### Tavily tarafından bulunan kaynaklar")
-                for source in sources:
+                for number, source in enumerate(sources, start=1):
                     title = str(source["title"]).replace("[", "(").replace("]", ")")
                     category = str(source.get("category") or "Kaynak")
-                    st.markdown(f"- **{category}:** [{title}]({source['url']})")
+                    st.markdown(
+                        f"{number}. **{category}:** [{title}]({source['url']})"
+                    )
             search_warnings = gemini_result.get("search_warnings") or []
             if search_warnings:
                 st.warning(
