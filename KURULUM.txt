@@ -1,4 +1,4 @@
-FUTBOL TAHMIN VE ANALIZ UYGULAMASI - ASAMA 9
+FUTBOL TAHMIN VE ANALIZ UYGULAMASI - ASAMA 11
 
 Bu paketteki dosyalar:
 - app.py: Streamlit arayuzu
@@ -20,4 +20,8 @@ Onemli:
 - Gemini ciktisi tek skor ve tek kupon kurallarina gore uygulama tarafindan kontrol edilir.
 - Ucretsiz Tavily temel aramasi ve Google AI Studio Gemini 3 Flash kotasi kullanilir.
 - Tahmin modeli takimlarin son ic saha/dis saha formunu, gol ortalamalarini, oranlari ve Poisson olasiliklarini birlikte kullanir.
+- Ortak olasilik motoru son maclara daha fazla agirlik verir; H2H, ayni ligde ayni oran ve diger liglerde ayni oran verilerini orneklem buyuklugune gore tahmine katar.
+- MS, skor, KG ve Alt/Ust ciktilari ortak dagilimdan uretilir; skor secilen MS sonucu ile celismez.
+- IY/MS secili macin takim formlarindan hesaplanir ve 1/X/2 olarak gosterilir.
+- Arayuz her veri kaynaginin tahmine yuzde kac agirlikla katildigini ve veri uyarilarini gosterir.
 - Streamlit Secrets icinde GEMINI_API_KEY ve TAVILY_API_KEY varsa Gemini haberleri tum istatistiklerle birlestirip kendi tahminini ve kupon yorumunu uretir.
