@@ -547,6 +547,7 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
                 league_rows,
                 home_form_rows=home_form_rows,
                 away_form_rows=away_form_rows,
+                same_odds_all_rows=same_all_rows,
             )
             report["same_odds_all"] = same_all_rows
         except Exception as exc:
@@ -610,13 +611,32 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
     p3.metric("Skor", predictions["score"])
     p4.metric("KG", predictions["btts_prediction"])
 
+    ms_probabilities = predictions.get("ms_probabilities") or {}
+    probability_frame = pd.DataFrame(
+        [
+            {
+                "Sonuç": label,
+                "Birleşik model olasılığı": (
+                    f"{float(ms_probabilities.get(label, 0)) * 100:.1f}%"
+                ),
+            }
+            for label in ("1", "X", "2")
+        ]
+    )
+    st.dataframe(probability_frame, use_container_width=True, hide_index=True)
+    st.caption(
+        f"Beklenen goller: {home} {float(predictions.get('expected_home_goals', 0)):.2f} — "
+        f"{away} {float(predictions.get('expected_away_goals', 0)):.2f} · "
+        f"Model güveni: {predictions.get('confidence', '—')}"
+    )
+
     totals = predictions["totals"]
     totals_frame = pd.DataFrame(
         [
             {
                 "Baremi": f"{threshold} üst/alt",
                 "Tahmin": data["prediction"],
-                "Geçmiş olasılık": (
+                "Birleşik model olasılığı": (
                     f"{data['probability'] * 100:.1f}%"
                     if data["probability"] is not None
                     else "—"
@@ -627,11 +647,24 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
     )
     st.dataframe(totals_frame, use_container_width=True, hide_index=True)
 
+    components = report.get("components") or []
+    if components:
+        st.markdown("##### Tahmini etkileyen veri kaynakları")
+        component_frame = pd.DataFrame(components)
+        for column in ("Ağırlık", "1", "X", "2"):
+            component_frame[column] = component_frame[column].map(
+                lambda value: f"{float(value) * 100:.1f}%"
+            )
+        st.dataframe(component_frame, use_container_width=True, hide_index=True)
+
+    for warning in report.get("warnings") or []:
+        st.warning(str(warning))
+
     st.markdown("#### İstatistiksel yorum")
     st.write(report["comment"])
     st.info(f"İstatistiksel ön kupon: {report['coupon']}")
     st.caption(
-        f"İstatistik örneklemi: {predictions['sample_size']} tamamlanmış lig maçı. "
+        f"Lig örneklemi: {predictions['sample_size']} tamamlanmış maç. "
         "Bu çıktı kesin sonuç veya kazanç garantisi değildir."
     )
 
@@ -660,7 +693,7 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
             + ", ".join(missing_keys)
         )
     else:
-        gemini_state_key = f"tavily_gemini_analysis_v2_{match.get('id')}"
+        gemini_state_key = f"tavily_gemini_analysis_v3_{match.get('id')}"
         if st.button(
             "Güncel haberleri araştır ve Gemini tahmini oluştur",
             key=f"tavily_gemini_button_{match.get('id')}",
