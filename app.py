@@ -636,9 +636,9 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
             {
                 "Baremi": f"{threshold} üst/alt",
                 "Tahmin": data["prediction"],
-                "Birleşik model olasılığı": (
-                    f"{data['probability'] * 100:.1f}%"
-                    if data["probability"] is not None
+                "Tahmin olasılığı": (
+                    f"{data['prediction_probability'] * 100:.1f}%"
+                    if data.get("prediction_probability") is not None
                     else "—"
                 ),
             }

@@ -1103,6 +1103,17 @@ def build_report(
     )
     totals["0.5"]["probability"] = max(float(totals["0.5"]["probability"]), btts_probability)
     totals["1.5"]["probability"] = max(float(totals["1.5"]["probability"]), btts_probability)
+
+    # `probability` her zaman Üst olasılığıdır. Arayüzde ise seçilen tarafın
+    # (Üst veya Alt) olasılığını gösterebilmek için ayrıca kaydediyoruz.
+    for total_data in totals.values():
+        over_probability = float(total_data["probability"])
+        prediction = "Üst" if over_probability >= 0.5 else "Alt"
+        total_data["prediction"] = prediction
+        total_data["prediction_probability"] = (
+            over_probability if prediction == "Üst" else 1 - over_probability
+        )
+
     btts_prediction = "KG Var" if btts_probability >= 0.5 else "KG Yok"
 
     representative_score = _representative_score(score_grid, ms_result, totals, btts_prediction)
