@@ -187,9 +187,12 @@ def _value_rows(
     actual: np.ndarray,
     odds: np.ndarray,
 ) -> list[dict[str, Any]]:
-    predicted = probabilities.argmax(axis=1)
-    selected_probability = probabilities[np.arange(len(actual)), predicted]
-    selected_odds = odds[np.arange(len(actual)), predicted]
+    # A value selection is not necessarily the most likely result. Compare all
+    # 1-X-2 outcomes with their own break-even probability and take the largest edge.
+    edges = probabilities - (1 / odds)
+    selected_results = edges.argmax(axis=1)
+    selected_probability = probabilities[np.arange(len(actual)), selected_results]
+    selected_odds = odds[np.arange(len(actual)), selected_results]
     edge = selected_probability - (1 / selected_odds)
     rows = []
     for threshold in VALUE_THRESHOLDS:
@@ -208,7 +211,7 @@ def _value_rows(
                 }
             )
             continue
-        won = predicted[selected] == actual[selected]
+        won = selected_results[selected] == actual[selected]
         chosen_odds = selected_odds[selected]
         net = np.where(won, STAKE * (chosen_odds - 1), -STAKE)
         rows.append(
