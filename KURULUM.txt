@@ -39,5 +39,8 @@ Onemli:
 - Highlightly çağrıları Cloudflare 1010 engeline takılmaması için sabit tarayıcı User-Agent, Origin ve Referer başlıklarıyla gönderilir.
 - Highlightly maç listesi servis sınırına uygun olarak en fazla 100 kayıt ister; eşleşme bulunmazsa takım adlarıyla daraltılmış yalnızca bir yedek çağrı yapılır.
 - Highlightly bağlamı rapora ve Gemini yorumuna eklenir; backtest yapılmadan sayısal model ağırlıklarını değiştirmez.
+- Analiz edilen maçları, kullanılan oranları, özet model çıktısını ve oluşturulmuş Gemini sonucunu sürümlü saklamak için Supabase SQL Editor içinde supabase_match_analyses.sql dosyasını bir kez çalıştırın.
+- Kayıtlı analiz tekrar açıldığında Highlightly, Tavily ve Gemini yeniden çağrılmaz. Kullanıcı isterse yeni analiz anı oranlarını girip açıkça yeniden analiz ederek yeni bir sürüm oluşturur.
+- Depolamayı korumak için ham geçmiş maçlar ve ham API cevapları analiz kaydında çoğaltılmaz; yalnızca kullanılan küçük özetler saklanır.
 - API fikstüründe yalnızca Supabase içinde tarihsel lig kodu bulunan maçlar gösterilir; desteklenmeyen ligler için ayrıntı alınmaz ve analiz yapılmaz.
 - API takım adları tarihsel CSV takım adlarıyla güvenilir biçimde eşleşmezse analiz güvenlik amacıyla durdurulur.
