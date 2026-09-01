@@ -34,6 +34,7 @@ Onemli:
 - Geçmiş oranlar birebir eşitlik yerine marjı temizlenmiş ±1,5 / ±3 / ±5 puan olasılık toleransıyla karşılaştırılır.
 - Aşama 23 ile güncel fikstür ve oranlar anahtarsız Football-Data fixtures.csv dosyasından 6 saatlik önbellekle alınır.
 - Fikstür saatleri Europe/London yaz/kış saatinden Europe/Istanbul saatine çevrilir; oynanmış, tamamlanmış veya başlama saati geçmiş maçlar gösterilmez.
+- Fikstür ekranındaki desteklenen lig sorgusu taze Supabase bağlantısıyla iki kez denenir ve 6 saat önbelleğe alınır; geçici HTTP/2 bağlantı kapanması tüm ekranı çökertmez.
 - HIGHLIGHTLY_API_KEY varsa yalnızca seçilen maç için son beş form, puan durumu ve maç saatine yakın kesin kadro alınır.
 - Highlightly çağrıları Cloudflare 1010 engeline takılmaması için sabit tarayıcı User-Agent, Origin ve Referer başlıklarıyla gönderilir.
 - Highlightly bağlamı rapora ve Gemini yorumuna eklenir; backtest yapılmadan sayısal model ağırlıklarını değiştirmez.
