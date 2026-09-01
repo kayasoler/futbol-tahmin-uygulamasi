@@ -625,6 +625,27 @@ def odds_movement(
     ]
 
 
+def totals_odds_movement(
+    opening_over: float | None,
+    opening_under: float | None,
+    current_over: float | None,
+    current_under: float | None,
+) -> list[dict[str, Any]]:
+    values = (opening_over, opening_under, current_over, current_under)
+    if any(value is None or value <= 1 for value in values):
+        return []
+    opening_inverse = (1 / float(opening_over), 1 / float(opening_under))
+    current_inverse = (1 / float(current_over), 1 / float(current_under))
+    opening_total = sum(opening_inverse)
+    current_total = sum(current_inverse)
+    opening_probabilities = tuple(value / opening_total for value in opening_inverse)
+    current_probabilities = tuple(value / current_total for value in current_inverse)
+    return [
+        {"Sonuç": label, "Açılış olasılığı": before, "Güncel olasılık": now, "Hareket": now - before}
+        for label, before, now in zip(("2.5 Üst", "2.5 Alt"), opening_probabilities, current_probabilities)
+    ]
+
+
 def _result_label(row: dict[str, Any]) -> str:
     result = str(row.get("full_time_result") or "").strip().upper()
     if result == "H":
