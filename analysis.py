@@ -677,7 +677,14 @@ def market_odds_context(match: dict[str, Any]) -> dict[str, Any]:
             "yalnızca piyasa hareketi bağlamıdır, istatistiksel model ağırlıklarını değiştirmez."
         ),
         "opening_source": "Manuel yaklaşık Bet365 açılış oranı",
-        "current_source": "Football-Data güncel Bet365 oranı",
+        "analysis_odds_source": str(match.get("analysis_odds_source") or "Football-Data referans oranı"),
+        "csv_reference_odds": {
+            "1": _number(match.get("csv_b365_home")),
+            "X": _number(match.get("csv_b365_draw")),
+            "2": _number(match.get("csv_b365_away")),
+            "2.5 Üst": _number(match.get("csv_b365_over_25")),
+            "2.5 Alt": _number(match.get("csv_b365_under_25")),
+        },
     }
     if any(value is not None for value in opening_1x2):
         context["one_x_two"] = {
