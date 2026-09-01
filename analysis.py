@@ -537,12 +537,15 @@ def fetch_same_odds_rows(
     match: dict[str, Any],
     division: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Find historical rows with identical Bet365 MS odds."""
+    """Find historical rows with a similar de-vigged Bet365 1-X-2 profile."""
     target = tuple(
         round(value, 2) if (value := _number(match.get(column))) is not None else None
         for column in ("b365_home", "b365_draw", "b365_away")
     )
     if any(value is None for value in target):
+        return []
+    target_probabilities = normalized_market_probabilities(target)
+    if target_probabilities is None:
         return []
 
     query = client.table("historical_matches").select(HISTORICAL_COLUMNS)
@@ -552,7 +555,7 @@ def fetch_same_odds_rows(
         ("b365_home", "b365_draw", "b365_away"),
         target,
     ):
-        query = query.eq(column, value)
+        query = query.gte(column, round(value * 0.70, 2)).lte(column, round(value * 1.30, 2))
 
     rows: list[dict[str, Any]] = []
     page_size = 1000
@@ -565,11 +568,58 @@ def fetch_same_odds_rows(
             .data
             or []
         )
-        rows.extend(page)
+        for row in page:
+            candidate = normalized_market_probabilities(
+                tuple(_number(row.get(column)) for column in ("b365_home", "b365_draw", "b365_away"))
+            )
+            if candidate is None:
+                continue
+            gap = max(abs(left - right) for left, right in zip(target_probabilities, candidate))
+            label = odds_similarity_label(gap)
+            if label:
+                prepared = dict(row)
+                prepared["odds_similarity"] = label
+                prepared["probability_gap"] = gap
+                rows.append(prepared)
         if len(page) < page_size:
             break
         start += page_size
-    return rows
+    rows.sort(key=lambda row: (float(row.get("probability_gap") or 1), str(row.get("match_date") or "")))
+    return rows[:500]
+
+
+def normalized_market_probabilities(
+    odds: tuple[float | None, float | None, float | None],
+) -> tuple[float, float, float] | None:
+    if any(value is None or value <= 1 for value in odds):
+        return None
+    inverses = tuple(1 / float(value) for value in odds)
+    total = sum(inverses)
+    return tuple(value / total for value in inverses)
+
+
+def odds_similarity_label(max_probability_gap: float) -> str | None:
+    if max_probability_gap <= 0.015:
+        return "Çok yakın"
+    if max_probability_gap <= 0.03:
+        return "Yakın"
+    if max_probability_gap <= 0.05:
+        return "Geniş"
+    return None
+
+
+def odds_movement(
+    opening: tuple[float | None, float | None, float | None],
+    current: tuple[float | None, float | None, float | None],
+) -> list[dict[str, Any]]:
+    opening_probabilities = normalized_market_probabilities(opening)
+    current_probabilities = normalized_market_probabilities(current)
+    if opening_probabilities is None or current_probabilities is None:
+        return []
+    return [
+        {"Sonuç": label, "Açılış olasılığı": before, "Güncel olasılık": now, "Hareket": now - before}
+        for label, before, now in zip(("1", "X", "2"), opening_probabilities, current_probabilities)
+    ]
 
 
 def _result_label(row: dict[str, Any]) -> str:
@@ -609,6 +659,7 @@ def rows_to_table(rows: list[dict[str, Any]]) -> pd.DataFrame:
                 "Skor": _score(row),
                 "Kazanan": _result_label(row),
                 "Üst 2.5": "Üst" if total is not None and total > 2.5 else "Alt" if total is not None else "—",
+                "Oran benzerliği": row.get("odds_similarity") or "—",
             }
         )
     return pd.DataFrame(output)
