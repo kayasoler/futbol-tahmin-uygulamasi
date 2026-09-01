@@ -35,6 +35,7 @@ Onemli:
 - Aşama 23 ile güncel fikstür ve oranlar anahtarsız Football-Data fixtures.csv dosyasından 6 saatlik önbellekle alınır.
 - Fikstür saatleri Europe/London yaz/kış saatinden Europe/Istanbul saatine çevrilir; oynanmış, tamamlanmış veya başlama saati geçmiş maçlar gösterilmez.
 - HIGHLIGHTLY_API_KEY varsa yalnızca seçilen maç için son beş form, puan durumu ve maç saatine yakın kesin kadro alınır.
+- Highlightly çağrıları Cloudflare 1010 engeline takılmaması için sabit tarayıcı User-Agent, Origin ve Referer başlıklarıyla gönderilir.
 - Highlightly bağlamı rapora ve Gemini yorumuna eklenir; backtest yapılmadan sayısal model ağırlıklarını değiştirmez.
 - API fikstüründe yalnızca Supabase içinde tarihsel lig kodu bulunan maçlar gösterilir; desteklenmeyen ligler için ayrıntı alınmaz ve analiz yapılmaz.
 - API takım adları tarihsel CSV takım adlarıyla güvenilir biçimde eşleşmezse analiz güvenlik amacıyla durdurulur.
