@@ -22,6 +22,7 @@ from analysis import (
 from backtest import aggregate_backtests, run_backtest
 from calibration import calibrate_model
 from api_football import fetch_fixtures
+from league_mapping import division_for_api_league, match_team_name
 from data_import import (
     FIXTURE_REQUIRED_COLUMNS,
     REQUIRED_COLUMNS,
@@ -908,14 +909,33 @@ def render_world_fixtures_page(client: Client) -> None:
         st.code(str(result["error"]))
         return
 
-    fixtures = list(result.get("fixtures") or [])
-    if not fixtures:
+    all_fixtures = list(result.get("fixtures") or [])
+    if not all_fixtures:
         st.info("Seçilen tarihte API kapsamında maç bulunamadı.")
         return
     quota = result.get("quota") or {}
     remaining = quota.get("daily_remaining") if isinstance(quota, dict) else None
     if remaining is not None:
         st.caption(f"API-Football günlük kalan istek: {remaining}")
+
+    available_divisions = set(fetch_recent_divisions(client))
+    fixtures: list[dict[str, object]] = []
+    for row in all_fixtures:
+        division = division_for_api_league(row.get("league_id"), available_divisions)
+        if division:
+            prepared = dict(row)
+            prepared["division"] = division
+            fixtures.append(prepared)
+    skipped = len(all_fixtures) - len(fixtures)
+    st.info(
+        f"API'deki {len(all_fixtures)} maçtan tarihsel verisi bulunan liglerdeki "
+        f"{len(fixtures)} maç gösteriliyor. {skipped} desteklenmeyen maç analiz dışında bırakıldı."
+    )
+    if not fixtures:
+        st.warning(
+            "Seçilen tarihte Supabase geçmiş verisiyle eşleşen bir API ligi bulunamadı."
+        )
+        return
 
     countries = sorted({str(row["country"]) for row in fixtures}, key=str.casefold)
     selected_countries = st.multiselect("Ülke filtresi", countries, key="api_countries")
@@ -934,6 +954,7 @@ def render_world_fixtures_page(client: Client) -> None:
                 "Saat": row.get("kickoff_time") or "—",
                 "Ülke": row["country"],
                 "Lig": row["league"],
+                "Veri kodu": row["division"],
                 "Ev sahibi": row["home_team"],
                 "Deplasman": row["away_team"],
                 "Durum": row["status_text"],
@@ -958,23 +979,42 @@ def render_world_fixtures_page(client: Client) -> None:
     if not 0 <= selected_index < len(visible):
         return
     fixture = visible[selected_index]
-    divisions = fetch_recent_divisions(client)
-    if not divisions:
-        st.warning("Analiz için eşleştirilebilecek tarihsel lig verisi bulunamadı.")
-        return
     st.markdown("#### Seçilen maçı analiz et")
     st.write(f"**{fixture['home_team']} — {fixture['away_team']}**")
-    st.caption(
-        "API lig adları ile CSV lig kodları farklıdır. Tarihsel karşılaştırma için doğru lig kodunu seçin."
+    division = str(fixture["division"])
+    league_rows = fetch_league_rows(client, division)
+    historical_teams = sorted(
+        {
+            str(row.get(column)).strip()
+            for row in league_rows
+            for column in ("home_team", "away_team")
+            if row.get(column)
+        },
+        key=str.casefold,
     )
-    division = st.selectbox("Tarihsel veri lig kodu", divisions, key="api_analysis_division")
+    home_name, home_score = match_team_name(str(fixture["home_team"]), historical_teams)
+    away_name, away_score = match_team_name(str(fixture["away_team"]), historical_teams)
+    if not home_name or not away_name:
+        st.warning(
+            "Bu maçın takım adları tarihsel CSV verisiyle güvenilir biçimde eşleşmediği için "
+            "analiz başlatılmadı. Yanlış takım geçmişi kullanmaktansa veri eşleştirmesi bekleniyor."
+        )
+        st.caption(
+            f"Eşleşme güveni — {fixture['home_team']}: %{home_score * 100:.0f}, "
+            f"{fixture['away_team']}: %{away_score * 100:.0f}"
+        )
+        return
+    st.success(
+        f"Otomatik eşleşme · {fixture['league']} → {division} · "
+        f"{fixture['home_team']} → {home_name} · {fixture['away_team']} → {away_name}"
+    )
     analysis_match = {
         "id": f"api-{fixture['api_fixture_id']}",
         "division": division,
         "match_date": fixture["match_date"],
         "kickoff_time": fixture["kickoff_time"],
-        "home_team": fixture["home_team"],
-        "away_team": fixture["away_team"],
+        "home_team": home_name,
+        "away_team": away_name,
         "b365_home": None,
         "b365_draw": None,
         "b365_away": None,
