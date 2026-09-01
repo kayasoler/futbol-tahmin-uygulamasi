@@ -18,6 +18,7 @@ from analysis import (
     h2h_summary_tables,
     odds_summary_table,
     odds_movement,
+    totals_odds_movement,
     rows_to_table,
 )
 from backtest import aggregate_backtests, run_backtest
@@ -608,7 +609,24 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
     else:
         st.info("Bu iki takım arasında veritabanında geçmiş karşılaşma bulunamadı.")
 
-    st.markdown("#### 2. Benzer Bet365 piyasa analizi")
+    st.markdown("#### 2. Açılış–güncel oran hareketi")
+    movement_rows = odds_movement(
+        tuple(match.get(column) for column in ("opening_b365_home", "opening_b365_draw", "opening_b365_away")),
+        tuple(match.get(column) for column in ("b365_home", "b365_draw", "b365_away")),
+    )
+    movement_rows.extend(totals_odds_movement(
+        match.get("opening_b365_over_25"), match.get("opening_b365_under_25"),
+        match.get("b365_over_25"), match.get("b365_under_25"),
+    ))
+    if movement_rows:
+        movement_frame = pd.DataFrame(movement_rows)
+        for column in ("Açılış olasılığı", "Güncel olasılık", "Hareket"):
+            movement_frame[column] = movement_frame[column].map(lambda value: f"{float(value) * 100:+.1f}%")
+        st.dataframe(movement_frame, use_container_width=True, hide_index=True)
+    else:
+        st.caption("Açılış oranları boşsa bu bölüm hesaplanmaz; ana analiz güncel oranlarla devam eder.")
+
+    st.markdown("#### 3. Benzer Bet365 piyasa analizi")
     st.caption(
         "Üçlü oranların marjı temizlenir; ±1,5 / ±3 / ±5 puan olasılık toleranslarıyla benzer geçmiş maçlar gösterilir."
     )
@@ -643,7 +661,7 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
         st.info("Tüm geçmiş veriler içinde tolerans aralığına giren benzer Bet365 piyasası bulunamadı.")
 
     predictions = report["predictions"]
-    st.markdown("#### 3. Tahmin özeti")
+    st.markdown("#### 4. Tahmin özeti")
     p1, p2, p3, p4 = st.columns(4)
     p1.metric("MS", predictions["ms"])
     p2.metric("İY/MS", predictions["ht_ms"])
@@ -707,7 +725,7 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
         "Bu çıktı kesin sonuç veya kazanç garantisi değildir."
     )
 
-    st.markdown("#### 4. Güncel takım ve oyuncu bağlamı")
+    st.markdown("#### 5. Güncel takım ve oyuncu bağlamı")
     try:
         highlightly_api_key = str(st.secrets["HIGHLIGHTLY_API_KEY"]).strip()
     except (KeyError, FileNotFoundError):
@@ -765,7 +783,7 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
     elif isinstance(live_context, dict):
         st.info("Highlightly seçilen maçı güvenilir biçimde eşleştiremedi; yanlış takım verisi kullanılmadı.")
 
-    st.markdown("#### 5. Canlı araştırma ve Gemini tahmini")
+    st.markdown("#### 6. Canlı araştırma ve Gemini tahmini")
     st.write(
         "Tavily yalnızca seçili maç ve takımlar için güncel kaynakları arar. Gemini, "
         "bu haberleri veritabanındaki istatistiklerle birleştirerek kendi tahminini üretir."
@@ -1036,6 +1054,9 @@ def render_football_data_fixtures_page(client: Client) -> None:
                 match["opening_b365_home"] = columns[0].number_input("Açılış 1", min_value=0.0, value=0.0, step=0.01, key=f"fd_open_h_{match['id']}") or None
                 match["opening_b365_draw"] = columns[1].number_input("Açılış X", min_value=0.0, value=0.0, step=0.01, key=f"fd_open_d_{match['id']}") or None
                 match["opening_b365_away"] = columns[2].number_input("Açılış 2", min_value=0.0, value=0.0, step=0.01, key=f"fd_open_a_{match['id']}") or None
+                total_columns = st.columns(2)
+                match["opening_b365_over_25"] = total_columns[0].number_input("Açılış 2.5 Üst", min_value=0.0, value=0.0, step=0.01, key=f"fd_open_o25_{match['id']}") or None
+                match["opening_b365_under_25"] = total_columns[1].number_input("Açılış 2.5 Alt", min_value=0.0, value=0.0, step=0.01, key=f"fd_open_u25_{match['id']}") or None
             render_match_analysis(client, match)
 
 
