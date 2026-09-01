@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import date
-from typing import Any
+from typing import Any, Iterable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -11,28 +11,56 @@ from urllib.request import Request, urlopen
 BASE_URL = "https://v3.football.api-sports.io"
 
 
-def _get(api_key: str, endpoint: str, params: dict[str, Any]) -> dict[str, Any]:
+def normalize_api_keys(value: str | Iterable[str]) -> list[str]:
+    if isinstance(value, str):
+        candidates = value.replace(";", ",").split(",")
+    else:
+        candidates = list(value)
+    keys: list[str] = []
+    for candidate in candidates:
+        key = str(candidate).strip()
+        if key and key not in keys:
+            keys.append(key)
+    return keys
+
+
+def _get(api_keys: str | Iterable[str], endpoint: str, params: dict[str, Any]) -> dict[str, Any]:
     query = urlencode({key: value for key, value in params.items() if value is not None})
-    request = Request(
-        f"{BASE_URL}/{endpoint}?{query}",
-        headers={"x-apisports-key": api_key, "Accept": "application/json"},
-    )
-    try:
-        with urlopen(request, timeout=35) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-            headers = {
-                "daily_limit": response.headers.get("x-ratelimit-requests-limit"),
-                "daily_remaining": response.headers.get("x-ratelimit-requests-remaining"),
-            }
-    except HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"API-Football HTTP {exc.code}: {detail[:500]}") from exc
-    except (URLError, TimeoutError) as exc:
-        raise RuntimeError(f"API-Football bağlantı hatası: {exc}") from exc
-    errors = payload.get("errors") or []
-    if errors:
-        raise RuntimeError(f"API-Football hata yanıtı: {errors}")
-    return {"response": payload.get("response") or [], "quota": headers}
+    keys = normalize_api_keys(api_keys)
+    if not keys:
+        raise RuntimeError("API-Football anahtarı bulunamadı.")
+    failures: list[str] = []
+    for index, api_key in enumerate(keys):
+        request = Request(
+            f"{BASE_URL}/{endpoint}?{query}",
+            headers={"x-apisports-key": api_key, "Accept": "application/json"},
+        )
+        try:
+            with urlopen(request, timeout=35) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+                headers = {
+                    "daily_limit": response.headers.get("x-ratelimit-requests-limit"),
+                    "daily_remaining": response.headers.get("x-ratelimit-requests-remaining"),
+                    "key_number": index + 1,
+                }
+        except HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            failures.append(f"anahtar {index + 1}: HTTP {exc.code} {detail[:160]}")
+            if exc.code in {401, 403, 429}:
+                continue
+            raise RuntimeError(f"API-Football HTTP {exc.code}: {detail[:500]}") from exc
+        except (URLError, TimeoutError) as exc:
+            raise RuntimeError(f"API-Football bağlantı hatası: {exc}") from exc
+        errors = payload.get("errors") or []
+        if errors:
+            error_text = str(errors)
+            failures.append(f"anahtar {index + 1}: {error_text[:160]}")
+            lowered = error_text.casefold()
+            if any(word in lowered for word in ("limit", "quota", "key", "request")):
+                continue
+            raise RuntimeError(f"API-Football hata yanıtı: {errors}")
+        return {"response": payload.get("response") or [], "quota": headers}
+    raise RuntimeError("API-Football anahtarlarının hiçbiri kullanılamadı. " + " | ".join(failures))
 
 
 def normalize_fixture(item: dict[str, Any]) -> dict[str, Any]:
@@ -72,7 +100,7 @@ def normalize_fixture(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def fetch_fixtures(
-    api_key: str,
+    api_key: str | Iterable[str],
     fixture_date: date | str,
     timezone: str = "Europe/Istanbul",
 ) -> dict[str, Any]:
