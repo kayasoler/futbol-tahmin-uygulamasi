@@ -27,3 +27,5 @@ Onemli:
 - Streamlit Secrets icinde GEMINI_API_KEY ve TAVILY_API_KEY varsa Gemini haberleri tum istatistiklerle birlestirip kendi tahminini ve kupon yorumunu uretir.
 - Aşama 20 ile API_FOOTBALL_KEY eklenirse tarih bazında dünya fikstürü, ülke/lig filtresi ve seçilen maçtan analiz başlatma ekranı açılır.
 - API-Football anahtarı GitHub dosyalarına yazılmaz; Streamlit Secrets içinde tutulur.
+- API fikstüründe yalnızca Supabase içinde tarihsel lig kodu bulunan maçlar gösterilir; desteklenmeyen ligler için ayrıntı alınmaz ve analiz yapılmaz.
+- API takım adları tarihsel CSV takım adlarıyla güvenilir biçimde eşleşmezse analiz güvenlik amacıyla durdurulur.
