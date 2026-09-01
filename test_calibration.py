@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from analysis import _canonical_source_url, normalized_market_probabilities, odds_similarity_label
+from analysis import _canonical_source_url, normalized_market_probabilities, odds_similarity_label, totals_odds_movement
 
 from calibration import (
     _bootstrap_improvement_probability,
@@ -13,6 +13,11 @@ from calibration import (
 
 
 class CalibrationRobustnessTests(unittest.TestCase):
+    def test_totals_movement_removes_two_way_margin(self):
+        rows = totals_odds_movement(1.90, 1.90, 1.70, 2.10)
+        self.assertEqual(len(rows), 2)
+        self.assertGreater(rows[0]["Hareket"], 0)
+        self.assertAlmostEqual(sum(row["Güncel olasılık"] for row in rows), 1.0)
     def test_odds_similarity_uses_probability_points(self):
         probabilities = normalized_market_probabilities((1.70, 3.80, 5.20))
         self.assertAlmostEqual(sum(probabilities), 1.0)
