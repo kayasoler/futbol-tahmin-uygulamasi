@@ -113,3 +113,45 @@ def fetch_fixtures(
         "fixtures": [normalize_fixture(item) for item in result["response"]],
         "quota": result["quota"],
     }
+
+
+def _match_winner_values(bets: list[dict[str, Any]]) -> dict[str, float]:
+    for bet in bets:
+        if str(bet.get("name") or "").strip().casefold() not in {"match winner", "1x2", "winner"}:
+            continue
+        values: dict[str, float] = {}
+        for item in bet.get("values") or []:
+            label = str(item.get("value") or "").strip().casefold()
+            try:
+                odd = float(item.get("odd"))
+            except (TypeError, ValueError):
+                continue
+            if label in {"home", "draw", "away"} and odd > 1:
+                values[label] = odd
+        if set(values) == {"home", "draw", "away"}:
+            return values
+    return {}
+
+
+def normalize_bet365_odds(response: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for fixture_item in response:
+        for bookmaker in fixture_item.get("bookmakers") or []:
+            name = str(bookmaker.get("name") or "").strip()
+            if name.casefold().replace(" ", "") != "bet365":
+                continue
+            values = _match_winner_values(bookmaker.get("bets") or [])
+            if values:
+                return {
+                    "bookmaker": "Bet365",
+                    "bookmaker_id": bookmaker.get("id"),
+                    "b365_home": values["home"],
+                    "b365_draw": values["draw"],
+                    "b365_away": values["away"],
+                    "updated_at": fixture_item.get("update"),
+                }
+    return None
+
+
+def fetch_bet365_odds(api_keys: str | Iterable[str], fixture_id: int | str) -> dict[str, Any]:
+    result = _get(api_keys, "odds", {"fixture": fixture_id, "bookmaker": 8})
+    return {"odds": normalize_bet365_odds(result["response"]), "quota": result["quota"]}
