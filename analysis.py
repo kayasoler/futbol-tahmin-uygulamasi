@@ -318,6 +318,9 @@ def _render_checked_gemini_report(
     selection = str(coupon.get("selection") or "Kupon önerilmiyor").strip()
     selection = re.split(r"\bAlternatif\s*:", selection, maxsplit=1, flags=re.IGNORECASE)[0].strip()
     reason = str(coupon.get("reason") or "").strip()
+    if re.search(r"\bKG\s*(?:Var|Yok)\b", selection, flags=re.IGNORECASE):
+        selection = "Kupon önerilmiyor: KG pazarı backtest filtresini geçemedi."
+        reason = "KG tahmini raporda gösterilir ancak yeterli geçmiş başarı sağlanana kadar kupona alınmaz."
     lines.extend(["", "## Kupon önerisi", f"**Seçim:** {selection}"])
     if reason:
         lines.append(reason)
@@ -415,6 +418,7 @@ Kurallar:
 - Kaynak açıkça desteklemiyorsa güncel iddiayı live_research listesine koyma.
 - Tek skor ver; "veya" ile ikinci skor yazma.
 - Tek kupon ver; alternatif kupon veya üçüncü seçim ekleme.
+- KG Var veya KG Yok tahminini raporda ver fakat kupon selection alanında kullanma.
 - Haber kapsamı yetersizse güveni Yüksek seçme.
 """
     client = genai.Client(api_key=gemini_api_key)
@@ -1202,9 +1206,6 @@ def build_report(
         confidence = abs(data["probability"] - 0.5)
         if confidence >= 0.08:
             market_candidates.append((confidence, f"{threshold} {'Üst' if data['probability'] >= 0.5 else 'Alt'}"))
-    btts_confidence = abs(btts_probability - 0.5)
-    if btts_confidence >= 0.08:
-        market_candidates.append((btts_confidence, "KG Var" if btts_probability >= 0.5 else "KG Yok"))
     market_candidates.sort(reverse=True)
     secondary_pick = market_candidates[0][1] if market_candidates else "tek tercih"
     if confidence_level == "Düşük":

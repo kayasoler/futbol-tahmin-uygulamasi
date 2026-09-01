@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from typing import Any, Callable
 
 import pandas as pd
@@ -9,6 +9,8 @@ from analysis import build_report
 
 
 ProgressCallback = Callable[[int, int], None]
+STAKE = 100.0
+RESULT_ODDS_COLUMNS = {"1": "b365_home", "X": "b365_draw", "2": "b365_away"}
 
 
 def _number(value: Any) -> float | None:
@@ -42,6 +44,57 @@ def _same_odds(row: dict[str, Any], target: dict[str, Any]) -> bool:
         if row_value is None or target_value is None or round(row_value, 2) != round(target_value, 2):
             return False
     return True
+
+
+def _majority_total(rows: list[dict[str, Any]], threshold: float) -> str:
+    over = under = 0
+    for row in rows:
+        home = _number(row.get("full_time_home_goals"))
+        away = _number(row.get("full_time_away_goals"))
+        if home is None or away is None:
+            continue
+        if home + away > threshold:
+            over += 1
+        else:
+            under += 1
+    return "Üst" if over >= under else "Alt"
+
+
+def _majority_btts(rows: list[dict[str, Any]]) -> str:
+    yes = no = 0
+    for row in rows:
+        home = _number(row.get("full_time_home_goals"))
+        away = _number(row.get("full_time_away_goals"))
+        if home is None or away is None:
+            continue
+        if home > 0 and away > 0:
+            yes += 1
+        else:
+            no += 1
+    return "KG Var" if yes >= no else "KG Yok"
+
+
+def _majority_score(rows: list[dict[str, Any]]) -> str:
+    scores: Counter[str] = Counter()
+    for row in rows:
+        home = _number(row.get("full_time_home_goals"))
+        away = _number(row.get("full_time_away_goals"))
+        if home is not None and away is not None:
+            scores[f"{int(home)}-{int(away)}"] += 1
+    return scores.most_common(1)[0][0] if scores else "—"
+
+
+def _empty_bet_group() -> dict[str, float]:
+    return {"bets": 0, "correct": 0, "odds_sum": 0.0, "net": 0.0}
+
+
+def _record_bet(group: dict[str, float], odds: float, won: bool) -> float:
+    net = STAKE * (odds - 1) if won else -STAKE
+    group["bets"] += 1
+    group["correct"] += int(won)
+    group["odds_sum"] += odds
+    group["net"] += net
+    return net
 
 
 def _model_match(row: dict[str, Any]) -> dict[str, Any]:
@@ -87,6 +140,17 @@ def run_backtest(
     correct = defaultdict(int)
     confidence_counts = defaultdict(int)
     confidence_correct = defaultdict(int)
+    reference_correct = defaultdict(int)
+    paired_model_correct = defaultdict(int)
+    reference_counts = defaultdict(int)
+    bet_groups = {
+        "Model · tüm güvenler": _empty_bet_group(),
+        "Model · Yüksek + Orta": _empty_bet_group(),
+        "Model · Yüksek": _empty_bet_group(),
+        "Model · Orta": _empty_bet_group(),
+        "Model · Düşük": _empty_bet_group(),
+        "Bet365 favorisine kör bahis": _empty_bet_group(),
+    }
     details: list[dict[str, Any]] = []
 
     for position, (target_date, target) in enumerate(targets, start=1):
@@ -137,12 +201,55 @@ def run_backtest(
         confidence_counts[confidence] += 1
         confidence_correct[confidence] += int(ms_is_correct)
 
+        model_odds = _number(target.get(RESULT_ODDS_COLUMNS.get(predicted_ms, "")))
+        model_net: float | None = None
+        if model_odds is not None and model_odds > 1:
+            model_net = _record_bet(
+                bet_groups["Model · tüm güvenler"], model_odds, ms_is_correct
+            )
+            confidence_group = f"Model · {confidence}"
+            if confidence_group in bet_groups:
+                _record_bet(bet_groups[confidence_group], model_odds, ms_is_correct)
+            if confidence in {"Yüksek", "Orta"}:
+                _record_bet(
+                    bet_groups["Model · Yüksek + Orta"], model_odds, ms_is_correct
+                )
+
+        result_odds = {
+            result: _number(target.get(column))
+            for result, column in RESULT_ODDS_COLUMNS.items()
+        }
+        if all(value is not None and value > 1 for value in result_odds.values()):
+            favorite = min(result_odds, key=result_odds.get)
+            favorite_won = favorite == actual_ms
+            reference_counts["MS"] += 1
+            reference_correct["MS"] += int(favorite_won)
+            paired_model_correct["MS"] += int(ms_is_correct)
+            _record_bet(
+                bet_groups["Bet365 favorisine kör bahis"],
+                float(result_odds[favorite]),
+                favorite_won,
+            )
+
         total_results: dict[str, str] = {}
         for threshold in ("0.5", "1.5", "2.5", "3.5"):
             actual_total = "Üst" if total_goals > float(threshold) else "Alt"
             predicted_total = str(predictions["totals"][threshold]["prediction"])
             correct[threshold] += int(predicted_total == actual_total)
+            reference_prediction = _majority_total(history, float(threshold))
+            reference_counts[threshold] += 1
+            reference_correct[threshold] += int(reference_prediction == actual_total)
+            paired_model_correct[threshold] += int(predicted_total == actual_total)
             total_results[threshold] = "✓" if predicted_total == actual_total else "✗"
+
+        reference_counts["KG"] += 1
+        reference_correct["KG"] += int(_majority_btts(history) == actual_btts)
+        paired_model_correct["KG"] += int(
+            str(predictions["btts_prediction"]) == actual_btts
+        )
+        reference_counts["Skor"] += 1
+        reference_correct["Skor"] += int(_majority_score(history) == actual_score)
+        paired_model_correct["Skor"] += int(str(predictions["score"]) == actual_score)
 
         details.append(
             {
@@ -151,6 +258,8 @@ def run_backtest(
                 "Tahmin / Gerçek MS": f"{predicted_ms} / {actual_ms}",
                 "Tahmin / Gerçek skor": f"{predictions['score']} / {actual_score}",
                 "Güven": confidence,
+                "Model MS oranı": f"{model_odds:.2f}" if model_odds is not None else "—",
+                "100 birim net": f"{model_net:+.1f}" if model_net is not None else "—",
                 "MS": "✓" if ms_is_correct else "✗",
                 "2.5": total_results["2.5"],
                 "KG": "✓" if str(predictions["btts_prediction"]) == actual_btts else "✗",
@@ -191,13 +300,69 @@ def run_backtest(
         for level in ("Yüksek", "Orta", "Düşük", "Bilinmiyor")
         if confidence_counts[level]
     ]
+    comparison_labels = [
+        ("MS", "Maç sonucu", "Bet365'in en düşük oranlı favorisi"),
+        ("0.5", "0.5 Alt/Üst", "O tarihe kadarki lig çoğunluğu"),
+        ("1.5", "1.5 Alt/Üst", "O tarihe kadarki lig çoğunluğu"),
+        ("2.5", "2.5 Alt/Üst", "O tarihe kadarki lig çoğunluğu"),
+        ("3.5", "3.5 Alt/Üst", "O tarihe kadarki lig çoğunluğu"),
+        ("KG", "Karşılıklı gol", "O tarihe kadarki lig çoğunluğu"),
+        ("Skor", "Kesin skor", "O tarihe kadarki en sık skor"),
+    ]
+    comparisons = []
+    for key, label, method in comparison_labels:
+        count = reference_counts[key]
+        if not count:
+            continue
+        model_rate = paired_model_correct[key] / count
+        reference_rate = reference_correct[key] / count
+        comparisons.append(
+            {
+                "Pazar": label,
+                "Referans": method,
+                "Maç": count,
+                "Model başarısı": model_rate,
+                "Referans başarısı": reference_rate,
+                "Model farkı": model_rate - reference_rate,
+            }
+        )
+
+    profit_metrics = []
+    for label in (
+        "Model · tüm güvenler",
+        "Model · Yüksek + Orta",
+        "Model · Yüksek",
+        "Model · Orta",
+        "Model · Düşük",
+        "Bet365 favorisine kör bahis",
+    ):
+        group = bet_groups[label]
+        bets = int(group["bets"])
+        if not bets:
+            continue
+        invested = bets * STAKE
+        profit_metrics.append(
+            {
+                "Strateji": label,
+                "Sanal bahis": bets,
+                "Doğru": int(group["correct"]),
+                "Ortalama oran": group["odds_sum"] / bets,
+                "Yatırılan": invested,
+                "Net sonuç": group["net"],
+                "ROI": group["net"] / invested,
+            }
+        )
     return {
         "tested": tested,
         "metrics": metrics,
         "confidence_metrics": confidence_metrics,
+        "comparisons": comparisons,
+        "profit_metrics": profit_metrics,
         "details": list(reversed(details)),
         "note": (
             "Her maç yalnızca kendi tarihinden önce oynanmış aynı lig maçlarıyla tahmin edildi. "
-            "Diğer liglerdeki aynı oran bileşeni, ücretsiz sunucuyu yormamak için backtestte kullanılmadı."
+            "Kâr testi, Bet365 CSV oranında her MS seçimine sabit 100 birim sanal bahis varsayar; "
+            "gerçek para, vergi veya komisyon içermez. Diğer liglerdeki aynı oran bileşeni, "
+            "ücretsiz sunucuyu yormamak için backtestte kullanılmadı."
         ),
     }

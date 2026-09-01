@@ -950,6 +950,38 @@ def render_backtest_page(client: Client) -> None:
         st.markdown("#### Güven seviyesine göre maç sonucu başarısı")
         st.dataframe(confidence_frame, use_container_width=True, hide_index=True)
 
+    comparison_frame = pd.DataFrame(result.get("comparisons") or [])
+    if not comparison_frame.empty:
+        for column in ("Model başarısı", "Referans başarısı", "Model farkı"):
+            comparison_frame[column] = comparison_frame[column].map(
+                lambda value: f"{value * 100:+.1f}%" if column == "Model farkı" else f"{value * 100:.1f}%"
+            )
+        st.markdown("#### Model ve basit referans karşılaştırması")
+        st.caption(
+            "Model farkının artı olması modelin referanstan daha başarılı, eksi olması daha zayıf olduğunu gösterir."
+        )
+        st.dataframe(comparison_frame, use_container_width=True, hide_index=True)
+
+    profit_frame = pd.DataFrame(result.get("profit_metrics") or [])
+    if not profit_frame.empty:
+        profit_frame["Ortalama oran"] = profit_frame["Ortalama oran"].map(
+            lambda value: f"{value:.2f}"
+        )
+        profit_frame["Yatırılan"] = profit_frame["Yatırılan"].map(
+            lambda value: f"{value:,.0f} birim"
+        )
+        profit_frame["Net sonuç"] = profit_frame["Net sonuç"].map(
+            lambda value: f"{value:+,.1f} birim"
+        )
+        profit_frame["ROI"] = profit_frame["ROI"].map(
+            lambda value: f"{value * 100:+.1f}%"
+        )
+        st.markdown("#### 100 birimlik sanal MS bahis testi")
+        st.warning(
+            "Bu tablo geçmiş performans simülasyonudur; gelecekte kâr veya kazanç garantisi değildir."
+        )
+        st.dataframe(profit_frame, use_container_width=True, hide_index=True)
+
     with st.expander("Test edilen maçların ayrıntılarını göster"):
         st.dataframe(pd.DataFrame(result["details"]), use_container_width=True, hide_index=True)
     st.caption(result["note"])
