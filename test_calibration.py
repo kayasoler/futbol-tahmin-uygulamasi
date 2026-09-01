@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from calibration import _bootstrap_improvement_probability, _value_rows
+from calibration import _bootstrap_improvement_probability, _fit_weights, _value_rows
 
 
 class CalibrationRobustnessTests(unittest.TestCase):
@@ -45,6 +45,21 @@ class CalibrationRobustnessTests(unittest.TestCase):
 
         self.assertEqual(plus_five["Sanal bahis"], 1)
         self.assertEqual(plus_five["Doğru"], 1)
+
+    def test_weight_fitting_returns_normalized_weights(self):
+        actual = np.array([0, 1, 2] * 10)
+        component = np.eye(3)[actual] * 0.70 + 0.10
+        components = np.repeat(component[:, np.newaxis, :], 4, axis=1)
+        training = {
+            "components": components,
+            "strengths": np.ones((len(actual), 4)),
+            "actual": actual,
+        }
+
+        weights, temperature = _fit_weights(training)
+
+        self.assertAlmostEqual(float(weights.sum()), 1.0)
+        self.assertIn(temperature, (0.8, 1.0, 1.2, 1.4, 1.6, 1.8))
 
 
 if __name__ == "__main__":
