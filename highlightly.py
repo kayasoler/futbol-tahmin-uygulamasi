@@ -11,17 +11,32 @@ from urllib.request import Request, urlopen
 
 
 BASE_URL = "https://soccer.highlightly.net"
+REQUEST_HEADERS = {
+    "Accept": "application/json, text/plain, */*",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    ),
+    "Origin": "https://highlightly.net",
+    "Referer": "https://highlightly.net/",
+}
 
 
 def _get(api_key: str, endpoint: str, params: dict[str, Any] | None = None) -> Any:
     query = urlencode({key: value for key, value in (params or {}).items() if value is not None})
     url = f"{BASE_URL}/{endpoint.lstrip('/')}" + (f"?{query}" if query else "")
-    request = Request(url, headers={"x-rapidapi-key": api_key, "Accept": "application/json"})
+    request = Request(url, headers={**REQUEST_HEADERS, "x-rapidapi-key": api_key})
     try:
         with urlopen(request, timeout=35) as response:
             return json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
+        if exc.code == 403 and "1010" in detail:
+            raise RuntimeError(
+                "Highlightly Cloudflare erişimi Streamlit sunucusunun HTTP imzasını engelledi. "
+                "İstek tarayıcı başlıklarıyla gönderildi; sorun sürerse Highlightly desteğinin "
+                "Streamlit Cloud çıkışına izin vermesi gerekir."
+            ) from exc
         raise RuntimeError(f"Highlightly HTTP {exc.code}: {detail[:400]}") from exc
     except (URLError, TimeoutError) as exc:
         raise RuntimeError(f"Highlightly bağlantı hatası: {exc}") from exc
