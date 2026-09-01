@@ -37,6 +37,7 @@ Onemli:
 - Fikstür ekranındaki desteklenen lig sorgusu taze Supabase bağlantısıyla iki kez denenir ve 6 saat önbelleğe alınır; geçici HTTP/2 bağlantı kapanması tüm ekranı çökertmez.
 - HIGHLIGHTLY_API_KEY varsa yalnızca seçilen maç için son beş form, puan durumu ve maç saatine yakın kesin kadro alınır.
 - Highlightly çağrıları Cloudflare 1010 engeline takılmaması için sabit tarayıcı User-Agent, Origin ve Referer başlıklarıyla gönderilir.
+- Highlightly maç listesi servis sınırına uygun olarak en fazla 100 kayıt ister; eşleşme bulunmazsa takım adlarıyla daraltılmış yalnızca bir yedek çağrı yapılır.
 - Highlightly bağlamı rapora ve Gemini yorumuna eklenir; backtest yapılmadan sayısal model ağırlıklarını değiştirmez.
 - API fikstüründe yalnızca Supabase içinde tarihsel lig kodu bulunan maçlar gösterilir; desteklenmeyen ligler için ayrıntı alınmaz ve analiz yapılmaz.
 - API takım adları tarihsel CSV takım adlarıyla güvenilir biçimde eşleşmezse analiz güvenlik amacıyla durdurulur.
