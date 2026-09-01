@@ -1,6 +1,6 @@
 import unittest
 
-from api_football import normalize_api_keys, normalize_fixture
+from api_football import normalize_api_keys, normalize_bet365_odds, normalize_fixture
 
 
 class ApiFootballTests(unittest.TestCase):
@@ -29,6 +29,20 @@ class ApiFootballTests(unittest.TestCase):
         self.assertEqual(row["kickoff_time"], "20:45:00")
         self.assertEqual(row["home_team"], "Home FC")
         self.assertEqual(row["away_team"], "Away FC")
+
+    def test_extracts_bet365_match_winner(self):
+        odds = normalize_bet365_odds([{
+            "update": "2026-09-01T12:00:00Z",
+            "bookmakers": [{"id": 8, "name": "Bet365", "bets": [{
+                "name": "Match Winner", "values": [
+                    {"value": "Home", "odd": "1.70"},
+                    {"value": "Draw", "odd": "3.80"},
+                    {"value": "Away", "odd": "5.20"},
+                ]
+            }]}]
+        }])
+        self.assertEqual(odds["b365_home"], 1.70)
+        self.assertEqual(odds["b365_away"], 5.20)
 
 
 if __name__ == "__main__":
