@@ -988,6 +988,21 @@ def get_football_data_fixtures() -> list[dict[str, object]]:
 
 
 @st.cache_data(ttl=21600, show_spinner=False)
+def get_supported_divisions() -> list[str]:
+    """Use a fresh Supabase HTTP client so a stale HTTP/2 stream cannot break the fixture page."""
+    last_error: Exception | None = None
+    for _ in range(2):
+        try:
+            fresh_client = create_client(
+                st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_SERVICE_ROLE_KEY"]
+            )
+            return fetch_recent_divisions(fresh_client)
+        except Exception as exc:
+            last_error = exc
+    raise RuntimeError("Desteklenen lig listesi iki denemede alınamadı.") from last_error
+
+
+@st.cache_data(ttl=21600, show_spinner=False)
 def get_highlightly_context(api_key: str, match_date: str, home: str, away: str) -> dict[str, object]:
     match = find_match(fetch_match_day(api_key, match_date), home, away)
     if not match:
@@ -1025,7 +1040,12 @@ def render_football_data_fixtures_page(client: Client) -> None:
         st.error("Football-Data güncel fikstürü alınamadı.")
         st.caption(str(exc))
         return
-    available_divisions = set(fetch_recent_divisions(client))
+    try:
+        available_divisions = set(get_supported_divisions())
+    except Exception as exc:
+        st.error("Geçmiş verisi bulunan ligler geçici bağlantı hatası nedeniyle alınamadı.")
+        st.caption("Sayfayı yenileyip tekrar deneyin. Ayrıntı: " + str(exc))
+        return
     supported = [row for row in fixtures if str(row.get("division")) in available_divisions]
     if not supported:
         st.warning("Güncel dosyada geçmiş verimizle eşleşen fikstür bulunamadı.")
