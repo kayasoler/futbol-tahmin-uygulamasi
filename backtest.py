@@ -11,6 +11,7 @@ from analysis import build_report
 ProgressCallback = Callable[[int, int], None]
 STAKE = 100.0
 RESULT_ODDS_COLUMNS = {"1": "b365_home", "X": "b365_draw", "2": "b365_away"}
+VALUE_THRESHOLDS = (0.00, 0.03, 0.05, 0.10)
 
 
 def _number(value: Any) -> float | None:
@@ -151,6 +152,7 @@ def run_backtest(
         "Model · Düşük": _empty_bet_group(),
         "Bet365 favorisine kör bahis": _empty_bet_group(),
     }
+    value_groups = {threshold: _empty_bet_group() for threshold in VALUE_THRESHOLDS}
     details: list[dict[str, Any]] = []
 
     for position, (target_date, target) in enumerate(targets, start=1):
@@ -203,6 +205,7 @@ def run_backtest(
 
         model_odds = _number(target.get(RESULT_ODDS_COLUMNS.get(predicted_ms, "")))
         model_net: float | None = None
+        value_edge: float | None = None
         if model_odds is not None and model_odds > 1:
             model_net = _record_bet(
                 bet_groups["Model · tüm güvenler"], model_odds, ms_is_correct
@@ -214,6 +217,14 @@ def run_backtest(
                 _record_bet(
                     bet_groups["Model · Yüksek + Orta"], model_odds, ms_is_correct
                 )
+            selected_probability = _number(
+                (predictions.get("ms_probabilities") or {}).get(predicted_ms)
+            )
+            if selected_probability is not None:
+                value_edge = selected_probability - (1 / model_odds)
+                for threshold in VALUE_THRESHOLDS:
+                    if value_edge >= threshold:
+                        _record_bet(value_groups[threshold], model_odds, ms_is_correct)
 
         result_odds = {
             result: _number(target.get(column))
@@ -259,6 +270,7 @@ def run_backtest(
                 "Tahmin / Gerçek skor": f"{predictions['score']} / {actual_score}",
                 "Güven": confidence,
                 "Model MS oranı": f"{model_odds:.2f}" if model_odds is not None else "—",
+                "Değer farkı": f"{value_edge * 100:+.1f} puan" if value_edge is not None else "—",
                 "100 birim net": f"{model_net:+.1f}" if model_net is not None else "—",
                 "MS": "✓" if ms_is_correct else "✗",
                 "2.5": total_results["2.5"],
@@ -352,17 +364,211 @@ def run_backtest(
                 "ROI": group["net"] / invested,
             }
         )
+
+    value_metrics = []
+    for threshold in VALUE_THRESHOLDS:
+        group = value_groups[threshold]
+        bets = int(group["bets"])
+        if not bets:
+            value_metrics.append(
+                {
+                    "Değer eşiği": f"En az +{threshold * 100:.0f} puan",
+                    "Eşik": threshold,
+                    "Sanal bahis": 0,
+                    "Doğru": 0,
+                    "Ortalama oran": None,
+                    "Yatırılan": 0.0,
+                    "Net sonuç": 0.0,
+                    "ROI": None,
+                }
+            )
+            continue
+        invested = bets * STAKE
+        value_metrics.append(
+            {
+                "Değer eşiği": f"En az +{threshold * 100:.0f} puan",
+                "Eşik": threshold,
+                "Sanal bahis": bets,
+                "Doğru": int(group["correct"]),
+                "Ortalama oran": group["odds_sum"] / bets,
+                "Yatırılan": invested,
+                "Net sonuç": group["net"],
+                "ROI": group["net"] / invested,
+            }
+        )
     return {
         "tested": tested,
         "metrics": metrics,
         "confidence_metrics": confidence_metrics,
         "comparisons": comparisons,
         "profit_metrics": profit_metrics,
+        "value_metrics": value_metrics,
         "details": list(reversed(details)),
         "note": (
             "Her maç yalnızca kendi tarihinden önce oynanmış aynı lig maçlarıyla tahmin edildi. "
             "Kâr testi, Bet365 CSV oranında her MS seçimine sabit 100 birim sanal bahis varsayar; "
             "gerçek para, vergi veya komisyon içermez. Diğer liglerdeki aynı oran bileşeni, "
             "ücretsiz sunucuyu yormamak için backtestte kullanılmadı."
+        ),
+    }
+
+
+def aggregate_backtests(
+    league_results: list[tuple[str, dict[str, Any]]],
+) -> dict[str, Any]:
+    """Combine independent league backtests without mixing their match histories."""
+    if not league_results:
+        raise ValueError("Birleştirilecek lig testi bulunamadı.")
+
+    combined_metrics: dict[str, dict[str, float]] = defaultdict(
+        lambda: {"correct": 0.0, "test": 0.0}
+    )
+    combined_profit: dict[str, dict[str, float]] = defaultdict(_empty_bet_group)
+    combined_value = {threshold: _empty_bet_group() for threshold in VALUE_THRESHOLDS}
+    league_summary: list[dict[str, Any]] = []
+
+    for division, result in league_results:
+        for row in result.get("metrics") or []:
+            item = combined_metrics[str(row["Ölçüm"])]
+            item["correct"] += float(row["Doğru"])
+            item["test"] += float(row["Test"])
+
+        profit_lookup = {
+            str(row["Strateji"]): row for row in result.get("profit_metrics") or []
+        }
+        for strategy, row in profit_lookup.items():
+            bets = int(row["Sanal bahis"])
+            group = combined_profit[strategy]
+            group["bets"] += bets
+            group["correct"] += int(row["Doğru"])
+            group["odds_sum"] += float(row["Ortalama oran"]) * bets
+            group["net"] += float(row["Net sonuç"])
+
+        value_lookup = {
+            float(row["Eşik"]): row for row in result.get("value_metrics") or []
+        }
+        for threshold, row in value_lookup.items():
+            bets = int(row["Sanal bahis"])
+            if not bets:
+                continue
+            group = combined_value[threshold]
+            group["bets"] += bets
+            group["correct"] += int(row["Doğru"])
+            group["odds_sum"] += float(row["Ortalama oran"]) * bets
+            group["net"] += float(row["Net sonuç"])
+
+        metric_lookup = {
+            str(row["Ölçüm"]): row for row in result.get("metrics") or []
+        }
+        confidence_lookup = {
+            str(row["Güven seviyesi"]): row
+            for row in result.get("confidence_metrics") or []
+        }
+        value_five = value_lookup.get(0.05, {})
+
+        def profit_roi(strategy: str) -> float | None:
+            row = profit_lookup.get(strategy)
+            return None if not row else float(row["ROI"])
+
+        league_summary.append(
+            {
+                "Lig": division,
+                "Test": int(result["tested"]),
+                "MS başarısı": float(metric_lookup["Maç sonucu"]["Başarı"]),
+                "Yüksek güven MS": (
+                    float(confidence_lookup["Yüksek"]["MS başarısı"])
+                    if "Yüksek" in confidence_lookup
+                    else None
+                ),
+                "Tüm seçimler ROI": profit_roi("Model · tüm güvenler"),
+                "Yüksek güven ROI": profit_roi("Model · Yüksek"),
+                "Bet365 favorisi ROI": profit_roi("Bet365 favorisine kör bahis"),
+                "+5 değer bahsi": int(value_five.get("Sanal bahis") or 0),
+                "+5 değer ROI": (
+                    float(value_five["ROI"])
+                    if value_five.get("ROI") is not None
+                    else None
+                ),
+            }
+        )
+
+    metric_order = [
+        "Maç sonucu",
+        "0.5 Alt/Üst",
+        "1.5 Alt/Üst",
+        "2.5 Alt/Üst",
+        "3.5 Alt/Üst",
+        "Karşılıklı gol",
+        "Kesin skor",
+    ]
+    metrics = []
+    for label in metric_order:
+        item = combined_metrics.get(label)
+        if not item or not item["test"]:
+            continue
+        metrics.append(
+            {
+                "Ölçüm": label,
+                "Doğru": int(item["correct"]),
+                "Test": int(item["test"]),
+                "Başarı": item["correct"] / item["test"],
+            }
+        )
+
+    strategy_order = [
+        "Model · tüm güvenler",
+        "Model · Yüksek + Orta",
+        "Model · Yüksek",
+        "Model · Orta",
+        "Model · Düşük",
+        "Bet365 favorisine kör bahis",
+    ]
+    profit_metrics = []
+    for strategy in strategy_order:
+        group = combined_profit.get(strategy)
+        if not group or not group["bets"]:
+            continue
+        bets = int(group["bets"])
+        invested = bets * STAKE
+        profit_metrics.append(
+            {
+                "Strateji": strategy,
+                "Sanal bahis": bets,
+                "Doğru": int(group["correct"]),
+                "Ortalama oran": group["odds_sum"] / bets,
+                "Yatırılan": invested,
+                "Net sonuç": group["net"],
+                "ROI": group["net"] / invested,
+            }
+        )
+
+    value_metrics = []
+    for threshold in VALUE_THRESHOLDS:
+        group = combined_value[threshold]
+        bets = int(group["bets"])
+        invested = bets * STAKE
+        value_metrics.append(
+            {
+                "Değer eşiği": f"En az +{threshold * 100:.0f} puan",
+                "Eşik": threshold,
+                "Sanal bahis": bets,
+                "Doğru": int(group["correct"]),
+                "Ortalama oran": group["odds_sum"] / bets if bets else None,
+                "Yatırılan": invested,
+                "Net sonuç": group["net"],
+                "ROI": group["net"] / invested if invested else None,
+            }
+        )
+
+    return {
+        "tested": sum(int(result["tested"]) for _, result in league_results),
+        "league_count": len(league_results),
+        "metrics": metrics,
+        "profit_metrics": profit_metrics,
+        "value_metrics": value_metrics,
+        "league_summary": league_summary,
+        "note": (
+            "Her lig kendi geçmişi içinde ayrı ayrı test edildi; liglerin geçmiş verileri birbirine karıştırılmadı. "
+            "Değer farkı, model olasılığı eksi seçilen Bet365 oranının başabaş olasılığıdır."
         ),
     }

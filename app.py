@@ -19,7 +19,7 @@ from analysis import (
     odds_summary_table,
     rows_to_table,
 )
-from backtest import run_backtest
+from backtest import aggregate_backtests, run_backtest
 from data_import import (
     FIXTURE_REQUIRED_COLUMNS,
     REQUIRED_COLUMNS,
@@ -887,41 +887,82 @@ def render_backtest_page(client: Client) -> None:
         st.warning("Backtest yapılabilecek lig bulunamadı.")
         return
 
+    mode = st.radio(
+        "Test biçimi",
+        ["Tek lig", "Toplu lig"],
+        horizontal=True,
+        key="backtest_mode",
+    )
     left, right = st.columns(2)
-    with left:
-        division = st.selectbox("Test edilecek lig", divisions, key="backtest_division")
+    if mode == "Tek lig":
+        with left:
+            selected_divisions = [
+                st.selectbox("Test edilecek lig", divisions, key="backtest_division")
+            ]
+    else:
+        preferred = [
+            division for division in ("EC", "E0", "SP1", "D1", "I1", "F1")
+            if division in divisions
+        ]
+        with left:
+            selected_divisions = st.multiselect(
+                "Test edilecek ligler",
+                divisions,
+                default=preferred or divisions[: min(6, len(divisions))],
+                key="backtest_divisions",
+            )
     with right:
         test_size = st.selectbox(
-            "Test edilecek son maç sayısı",
+            "Her ligde test edilecek son maç",
             [50, 100, 200, 300],
             index=3,
             key="backtest_size",
         )
 
-    if st.button("Backtesti başlat", type="primary", use_container_width=True):
-        progress = st.progress(0, text="Lig verileri hazırlanıyor...")
-        try:
-            league_rows = fetch_league_rows(client, division)
-
-            def update_progress(done: int, total: int) -> None:
-                progress.progress(
-                    min(1.0, done / max(1, total)),
-                    text=f"Tahminler sınanıyor: {done}/{total}",
-                )
-
-            result = run_backtest(
-                league_rows,
-                test_size=int(test_size),
-                progress_callback=update_progress,
-            )
-            st.session_state["backtest_result"] = result
-            st.session_state["backtest_result_title"] = f"{division} · son {result['tested']} maç"
-            progress.empty()
-        except Exception as exc:
-            progress.empty()
-            st.error("Backtest tamamlanamadı.")
-            st.code(str(exc))
+    button_label = "Toplu testi başlat" if mode == "Toplu lig" else "Backtesti başlat"
+    if st.button(button_label, type="primary", use_container_width=True):
+        if not selected_divisions:
+            st.warning("En az bir lig seçin.")
             return
+        progress = st.progress(0, text="Lig verileri hazırlanıyor...")
+        league_results: list[tuple[str, dict[str, object]]] = []
+        league_errors: list[str] = []
+        league_total = len(selected_divisions)
+        for league_index, division in enumerate(selected_divisions):
+            try:
+                league_rows = fetch_league_rows(client, division)
+
+                def update_progress(done: int, total: int) -> None:
+                    overall = (league_index + done / max(1, total)) / league_total
+                    progress.progress(
+                        min(1.0, overall),
+                        text=f"{division}: {done}/{total} · Lig {league_index + 1}/{league_total}",
+                    )
+
+                league_result = run_backtest(
+                    league_rows,
+                    test_size=int(test_size),
+                    progress_callback=update_progress,
+                )
+                league_results.append((division, league_result))
+            except Exception as exc:
+                league_errors.append(f"{division}: {exc}")
+        progress.empty()
+        if not league_results:
+            st.error("Backtest tamamlanamadı.")
+            for error in league_errors:
+                st.warning(error)
+            return
+        if mode == "Toplu lig":
+            result = aggregate_backtests(league_results)
+            result["league_errors"] = league_errors
+            title = f"{result['league_count']} lig · toplam {result['tested']} maç"
+        else:
+            result = league_results[0][1]
+            result["league_errors"] = league_errors
+            title = f"{selected_divisions[0]} · son {result['tested']} maç"
+        st.session_state["backtest_result"] = result
+        st.session_state["backtest_result_title"] = title
 
     result = st.session_state.get("backtest_result")
     if not result:
@@ -931,18 +972,53 @@ def render_backtest_page(client: Client) -> None:
     st.divider()
     st.subheader(f"📋 Sonuçlar · {st.session_state.get('backtest_result_title', '')}")
     metric_lookup = {row["Ölçüm"]: row for row in result["metrics"]}
+    value_five = next(
+        (row for row in result.get("value_metrics") or [] if float(row.get("Eşik", -1)) == 0.05),
+        None,
+    )
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Test edilen maç", result["tested"])
-    c2.metric("MS başarısı", f"{metric_lookup['Maç sonucu']['Başarı'] * 100:.1f}%")
-    c3.metric("2.5 Alt/Üst", f"{metric_lookup['2.5 Alt/Üst']['Başarı'] * 100:.1f}%")
-    c4.metric("KG başarısı", f"{metric_lookup['Karşılıklı gol']['Başarı'] * 100:.1f}%")
+    if result.get("league_summary"):
+        c1.metric("Test edilen lig", result.get("league_count", 0))
+        c2.metric("Test edilen maç", result["tested"])
+        c3.metric("MS başarısı", f"{metric_lookup['Maç sonucu']['Başarı'] * 100:.1f}%")
+        c4.metric(
+            "+5 değer ROI",
+            f"{float(value_five['ROI']) * 100:+.1f}%"
+            if value_five and value_five.get("ROI") is not None else "—",
+        )
+    else:
+        c1.metric("Test edilen maç", result["tested"])
+        c2.metric("MS başarısı", f"{metric_lookup['Maç sonucu']['Başarı'] * 100:.1f}%")
+        c3.metric("2.5 Alt/Üst", f"{metric_lookup['2.5 Alt/Üst']['Başarı'] * 100:.1f}%")
+        c4.metric("KG başarısı", f"{metric_lookup['Karşılıklı gol']['Başarı'] * 100:.1f}%")
 
     metrics_frame = pd.DataFrame(result["metrics"])
     metrics_frame["Başarı"] = metrics_frame["Başarı"].map(lambda value: f"{value * 100:.1f}%")
     st.markdown("#### Pazar bazında başarı")
     st.dataframe(metrics_frame, use_container_width=True, hide_index=True)
 
-    confidence_frame = pd.DataFrame(result["confidence_metrics"])
+    league_frame = pd.DataFrame(result.get("league_summary") or [])
+    if not league_frame.empty:
+        for column in (
+            "MS başarısı",
+            "Yüksek güven MS",
+            "Tüm seçimler ROI",
+            "Yüksek güven ROI",
+            "Bet365 favorisi ROI",
+            "+5 değer ROI",
+        ):
+            league_frame[column] = league_frame[column].map(
+                lambda value: (
+                    "—"
+                    if value is None or pd.isna(value)
+                    else f"{value * 100:+.1f}%" if column.endswith("ROI")
+                    else f"{value * 100:.1f}%"
+                )
+            )
+        st.markdown("#### Lig bazında toplu sonuç")
+        st.dataframe(league_frame, use_container_width=True, hide_index=True)
+
+    confidence_frame = pd.DataFrame(result.get("confidence_metrics") or [])
     if not confidence_frame.empty:
         confidence_frame["MS başarısı"] = confidence_frame["MS başarısı"].map(
             lambda value: f"{value * 100:.1f}%"
@@ -961,6 +1037,27 @@ def render_backtest_page(client: Client) -> None:
             "Model farkının artı olması modelin referanstan daha başarılı, eksi olması daha zayıf olduğunu gösterir."
         )
         st.dataframe(comparison_frame, use_container_width=True, hide_index=True)
+
+    value_frame = pd.DataFrame(result.get("value_metrics") or [])
+    if not value_frame.empty:
+        value_frame = value_frame.drop(columns=["Eşik"], errors="ignore")
+        value_frame["Ortalama oran"] = value_frame["Ortalama oran"].map(
+            lambda value: "—" if value is None or pd.isna(value) else f"{value:.2f}"
+        )
+        value_frame["Yatırılan"] = value_frame["Yatırılan"].map(
+            lambda value: f"{value:,.0f} birim"
+        )
+        value_frame["Net sonuç"] = value_frame["Net sonuç"].map(
+            lambda value: f"{value:+,.1f} birim"
+        )
+        value_frame["ROI"] = value_frame["ROI"].map(
+            lambda value: "—" if value is None or pd.isna(value) else f"{value * 100:+.1f}%"
+        )
+        st.markdown("#### Değer farkı eşiğine göre sanal MS testi")
+        st.caption(
+            "Değer farkı = model olasılığı − seçilen oranın başabaş olasılığı. Daha yüksek eşik daha seçici davranır."
+        )
+        st.dataframe(value_frame, use_container_width=True, hide_index=True)
 
     profit_frame = pd.DataFrame(result.get("profit_metrics") or [])
     if not profit_frame.empty:
@@ -982,8 +1079,11 @@ def render_backtest_page(client: Client) -> None:
         )
         st.dataframe(profit_frame, use_container_width=True, hide_index=True)
 
-    with st.expander("Test edilen maçların ayrıntılarını göster"):
-        st.dataframe(pd.DataFrame(result["details"]), use_container_width=True, hide_index=True)
+    if result.get("details"):
+        with st.expander("Test edilen maçların ayrıntılarını göster"):
+            st.dataframe(pd.DataFrame(result["details"]), use_container_width=True, hide_index=True)
+    for error in result.get("league_errors") or []:
+        st.warning(f"Atlanan lig · {error}")
     st.caption(result["note"])
 
 
