@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, datetime
 from io import BytesIO
 from typing import TYPE_CHECKING, Any
 
 import pandas as pd
+from zoneinfo import ZoneInfo
 
 if TYPE_CHECKING:
     from supabase import Client
@@ -207,9 +208,15 @@ def validate_and_prepare_fixtures(
             rows = [str(index + 2) for index in prepared.index[invalid_odds][:10]]
             raise ValueError(f"{column} oranı geçersiz olan satırlar var: " + ", ".join(rows))
 
-    prepared["_match_date"] = parsed_dates.dt.strftime("%Y-%m-%d")
-    prepared["_match_date_value"] = parsed_dates.dt.date
-    prepared["_kickoff_time"] = parsed_times
+    istanbul_now = datetime.now(ZoneInfo("Europe/Istanbul"))
+    converted_datetimes = [
+        datetime.combine(date_value.date(), pd.to_datetime(time_value).time(), tzinfo=ZoneInfo("Europe/London"))
+        .astimezone(ZoneInfo("Europe/Istanbul"))
+        for date_value, time_value in zip(parsed_dates, parsed_times)
+    ]
+    prepared["_match_date"] = [value.date().isoformat() for value in converted_datetimes]
+    prepared["_match_date_value"] = [value.date() for value in converted_datetimes]
+    prepared["_kickoff_time"] = [value.strftime("%H:%M:%S") for value in converted_datetimes]
     prepared["_home_key"] = prepared["HomeTeam"].str.lower()
     prepared["_away_key"] = prepared["AwayTeam"].str.lower()
 
@@ -218,7 +225,10 @@ def validate_and_prepare_fixtures(
         rows = [str(index + 2) for index in prepared.index[same_team][:10]]
         raise ValueError("Ev sahibi ve deplasman takımı aynı olan satırlar var: " + ", ".join(rows))
 
-    past_mask = prepared["_match_date_value"] < minimum_date
+    past_mask = pd.Series(
+        [value <= istanbul_now or value.date() < minimum_date for value in converted_datetimes],
+        index=prepared.index,
+    )
     past_count = int(past_mask.sum())
     prepared = prepared.loc[~past_mask].copy()
 
