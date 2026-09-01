@@ -17,11 +17,12 @@ from analysis import (
     generate_gemini_grounded_analysis,
     h2h_summary_tables,
     odds_summary_table,
+    odds_movement,
     rows_to_table,
 )
 from backtest import aggregate_backtests, run_backtest
 from calibration import calibrate_model
-from api_football import fetch_fixtures, normalize_api_keys
+from api_football import fetch_bet365_odds, fetch_fixtures, normalize_api_keys
 from league_mapping import division_for_api_league, match_team_name
 from data_import import (
     FIXTURE_REQUIRED_COLUMNS,
@@ -597,9 +598,9 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
     else:
         st.info("Bu iki takım arasında veritabanında geçmiş karşılaşma bulunamadı.")
 
-    st.markdown("#### 2. Aynı Bet365 oran analizi")
+    st.markdown("#### 2. Benzer Bet365 piyasa analizi")
     st.caption(
-        "Önce aynı lig, ardından tüm ligler içindeki birebir MS oranı eşleşmeleri gösterilir."
+        "Üçlü oranların marjı temizlenir; ±1,5 / ±3 / ±5 puan olasılık toleranslarıyla benzer geçmiş maçlar gösterilir."
     )
     st.markdown("##### A) Aynı ligde aynı oranlar")
     if same_league_rows:
@@ -614,7 +615,7 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
             hide_index=True,
         )
     else:
-        st.info("Bu ligde aynı üçlü Bet365 MS oranına sahip geçmiş maç bulunamadı.")
+        st.info("Bu ligde tolerans aralığına giren benzer Bet365 piyasası bulunamadı.")
 
     st.markdown("##### B) Tüm liglerde aynı oranlar")
     if same_all_rows:
@@ -629,7 +630,7 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
             hide_index=True,
         )
     else:
-        st.info("Tüm geçmiş veriler içinde aynı üçlü Bet365 MS oranına sahip maç bulunamadı.")
+        st.info("Tüm geçmiş veriler içinde tolerans aralığına giren benzer Bet365 piyasası bulunamadı.")
 
     predictions = report["predictions"]
     st.markdown("#### 3. Tahmin özeti")
@@ -873,6 +874,11 @@ def get_api_football_fixtures(api_keys: tuple[str, ...], fixture_date: str) -> d
     return fetch_fixtures(api_keys, fixture_date)
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def get_api_bet365_odds(api_keys: tuple[str, ...], fixture_id: int) -> dict[str, object]:
+    return fetch_bet365_odds(api_keys, fixture_id)
+
+
 def get_api_football_keys() -> tuple[str, ...]:
     values: list[str] = []
     try:
@@ -1024,6 +1030,44 @@ def render_world_fixtures_page(client: Client) -> None:
         f"Otomatik eşleşme · {fixture['league']} → {division} · "
         f"{fixture['home_team']} → {home_name} · {fixture['away_team']} → {away_name}"
     )
+    fixture_id = int(fixture["api_fixture_id"])
+    odds_state_key = f"api_bet365_odds_{fixture_id}"
+    if st.button("Güncel Bet365 oranını API'den getir", key=f"fetch_api_odds_{fixture_id}", use_container_width=True):
+        with st.spinner("Seçilen maçın Bet365 oranı aranıyor..."):
+            try:
+                st.session_state[odds_state_key] = get_api_bet365_odds(api_keys, fixture_id)
+            except Exception as exc:
+                st.session_state[odds_state_key] = {"error": str(exc)}
+    odds_result = st.session_state.get(odds_state_key)
+    current_odds: dict[str, object] = {}
+    if isinstance(odds_result, dict) and odds_result.get("error"):
+        st.warning("Güncel oran alınamadı; analiz oransız devam edebilir.")
+        st.caption(str(odds_result["error"]))
+    elif isinstance(odds_result, dict):
+        current_odds = dict(odds_result.get("odds") or {})
+        if current_odds:
+            st.success(
+                f"Güncel Bet365 · {current_odds['b365_home']:.2f} / "
+                f"{current_odds['b365_draw']:.2f} / {current_odds['b365_away']:.2f}"
+            )
+        else:
+            st.info("API bu maç için Bet365 1-X-2 oranı döndürmedi.")
+
+    with st.expander("İsteğe bağlı yaklaşık Bet365 açılış oranı"):
+        st.caption("Bulamazsanız üç alanı da 0 bırakın; analiz güncel oranla devam eder.")
+        opening_columns = st.columns(3)
+        opening_home = opening_columns[0].number_input("Açılış 1", min_value=0.0, value=0.0, step=0.01, key=f"opening_h_{fixture_id}")
+        opening_draw = opening_columns[1].number_input("Açılış X", min_value=0.0, value=0.0, step=0.01, key=f"opening_d_{fixture_id}")
+        opening_away = opening_columns[2].number_input("Açılış 2", min_value=0.0, value=0.0, step=0.01, key=f"opening_a_{fixture_id}")
+    movement_rows = odds_movement(
+        tuple(value if value > 1 else None for value in (opening_home, opening_draw, opening_away)),
+        tuple(current_odds.get(column) for column in ("b365_home", "b365_draw", "b365_away")),
+    )
+    if movement_rows:
+        movement_frame = pd.DataFrame(movement_rows)
+        for column in ("Açılış olasılığı", "Güncel olasılık", "Hareket"):
+            movement_frame[column] = movement_frame[column].map(lambda value: f"{value * 100:+.1f}%")
+        st.dataframe(movement_frame, use_container_width=True, hide_index=True)
     analysis_match = {
         "id": f"api-{fixture['api_fixture_id']}",
         "division": division,
@@ -1031,9 +1075,12 @@ def render_world_fixtures_page(client: Client) -> None:
         "kickoff_time": fixture["kickoff_time"],
         "home_team": home_name,
         "away_team": away_name,
-        "b365_home": None,
-        "b365_draw": None,
-        "b365_away": None,
+        "b365_home": current_odds.get("b365_home"),
+        "b365_draw": current_odds.get("b365_draw"),
+        "b365_away": current_odds.get("b365_away"),
+        "opening_b365_home": opening_home if opening_home > 1 else None,
+        "opening_b365_draw": opening_draw if opening_draw > 1 else None,
+        "opening_b365_away": opening_away if opening_away > 1 else None,
         "b365_over_25": None,
         "b365_under_25": None,
         "entry_method": "api-football",
