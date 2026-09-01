@@ -1,22 +1,27 @@
 from __future__ import annotations
 
 from io import BytesIO
+from datetime import datetime
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 import pandas as pd
+from zoneinfo import ZoneInfo
 
 
 FIXTURES_URL = "https://www.football-data.co.uk/fixtures.csv"
 
 
-def parse_fixtures_csv(content: bytes) -> list[dict[str, Any]]:
+def parse_fixtures_csv(content: bytes, now: datetime | None = None) -> list[dict[str, Any]]:
     frame = pd.read_csv(BytesIO(content))
     required = {"Div", "Date", "HomeTeam", "AwayTeam"}
     missing = required - set(frame.columns)
     if missing:
         raise ValueError("Football-Data fikstüründe eksik sütunlar: " + ", ".join(sorted(missing)))
+    istanbul_now = now or datetime.now(ZoneInfo("Europe/Istanbul"))
+    if istanbul_now.tzinfo is None:
+        istanbul_now = istanbul_now.replace(tzinfo=ZoneInfo("Europe/Istanbul"))
     rows: list[dict[str, Any]] = []
     for _, item in frame.iterrows():
         parsed_date = pd.to_datetime(item.get("Date"), dayfirst=True, errors="coerce")
@@ -28,11 +33,25 @@ def parse_fixtures_csv(content: bytes) -> list[dict[str, Any]]:
         kickoff = str(item.get("Time") or "").strip()
         if kickoff.casefold() == "nan":
             kickoff = ""
+        parsed_time = pd.to_datetime(kickoff, format="%H:%M", errors="coerce")
+        if pd.isna(parsed_time):
+            continue
+        london_kickoff = datetime.combine(
+            parsed_date.date(), parsed_time.time(), tzinfo=ZoneInfo("Europe/London")
+        )
+        istanbul_kickoff = london_kickoff.astimezone(ZoneInfo("Europe/Istanbul"))
+        completed = any(
+            not pd.isna(item.get(column)) and str(item.get(column)).strip() not in {"", "nan"}
+            for column in ("FTHG", "FTAG", "FTR")
+            if column in frame.columns
+        )
+        if completed or istanbul_kickoff <= istanbul_now:
+            continue
         rows.append({
-            "id": f"fd-{item['Div']}-{parsed_date.date()}-{item['HomeTeam']}-{item['AwayTeam']}",
+            "id": f"fd-{item['Div']}-{istanbul_kickoff.date()}-{item['HomeTeam']}-{item['AwayTeam']}",
             "division": str(item["Div"]).strip(),
-            "match_date": parsed_date.date().isoformat(),
-            "kickoff_time": kickoff or None,
+            "match_date": istanbul_kickoff.date().isoformat(),
+            "kickoff_time": istanbul_kickoff.strftime("%H:%M:%S"),
             "home_team": str(item["HomeTeam"]).strip(),
             "away_team": str(item["AwayTeam"]).strip(),
             "b365_home": number("B365H"),
