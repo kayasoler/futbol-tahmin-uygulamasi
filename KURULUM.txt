@@ -28,5 +28,8 @@ Onemli:
 - Aşama 20 ile API_FOOTBALL_KEY eklenirse tarih bazında dünya fikstürü, ülke/lig filtresi ve seçilen maçtan analiz başlatma ekranı açılır.
 - API-Football anahtarı GitHub dosyalarına yazılmaz; Streamlit Secrets içinde tutulur.
 - Birden fazla anahtar için API_FOOTBALL_KEYS = ["anahtar1", "anahtar2", "anahtar3"] kullanılabilir; kota veya anahtar hatasında sıradaki anahtar denenir.
+- Seçilen maçın Bet365 oranı yalnızca kullanıcı istediğinde API'den alınır ve 30 dakika önbellekte tutulur.
+- Yaklaşık açılış oranı isteğe bağlıdır; boş bırakılırsa güncel oranla analiz devam eder.
+- Geçmiş oranlar birebir eşitlik yerine marjı temizlenmiş ±1,5 / ±3 / ±5 puan olasılık toleransıyla karşılaştırılır.
 - API fikstüründe yalnızca Supabase içinde tarihsel lig kodu bulunan maçlar gösterilir; desteklenmeyen ligler için ayrıntı alınmaz ve analiz yapılmaz.
 - API takım adları tarihsel CSV takım adlarıyla güvenilir biçimde eşleşmezse analiz güvenlik amacıyla durdurulur.
