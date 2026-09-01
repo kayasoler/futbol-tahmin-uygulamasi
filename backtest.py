@@ -154,6 +154,7 @@ def run_backtest(
     }
     value_groups = {threshold: _empty_bet_group() for threshold in VALUE_THRESHOLDS}
     details: list[dict[str, Any]] = []
+    calibration_records: list[dict[str, Any]] = []
 
     for position, (target_date, target) in enumerate(targets, start=1):
         history = [row for row_date, row in dated_rows if row_date < target_date]
@@ -275,6 +276,30 @@ def run_backtest(
                 "MS": "✓" if ms_is_correct else "✗",
                 "2.5": total_results["2.5"],
                 "KG": "✓" if str(predictions["btts_prediction"]) == actual_btts else "✗",
+            }
+        )
+        calibration_records.append(
+            {
+                "date": str(target.get("match_date") or ""),
+                "division": str(target.get("division") or ""),
+                "actual": actual_ms,
+                "odds": {
+                    result: _number(target.get(column))
+                    for result, column in RESULT_ODDS_COLUMNS.items()
+                },
+                "current_probabilities": {
+                    result: float((predictions.get("ms_probabilities") or {}).get(result, 0))
+                    for result in ("1", "X", "2")
+                },
+                "components": {
+                    str(component["Kaynak"]): {
+                        "probabilities": {
+                            result: float(component[result]) for result in ("1", "X", "2")
+                        },
+                        "sample": int(component.get("Örneklem") or 0),
+                    }
+                    for component in report.get("components") or []
+                },
             }
         )
         if progress_callback and (position == 1 or position == len(targets) or position % 5 == 0):
@@ -403,6 +428,7 @@ def run_backtest(
         "comparisons": comparisons,
         "profit_metrics": profit_metrics,
         "value_metrics": value_metrics,
+        "calibration_records": calibration_records,
         "details": list(reversed(details)),
         "note": (
             "Her maç yalnızca kendi tarihinden önce oynanmış aynı lig maçlarıyla tahmin edildi. "
@@ -567,6 +593,13 @@ def aggregate_backtests(
         "profit_metrics": profit_metrics,
         "value_metrics": value_metrics,
         "league_summary": league_summary,
+        "calibration_leagues": [
+            {
+                "division": division,
+                "records": result.get("calibration_records") or [],
+            }
+            for division, result in league_results
+        ],
         "note": (
             "Her lig kendi geçmişi içinde ayrı ayrı test edildi; liglerin geçmiş verileri birbirine karıştırılmadı. "
             "Değer farkı, model olasılığı eksi seçilen Bet365 oranının başabaş olasılığıdır."

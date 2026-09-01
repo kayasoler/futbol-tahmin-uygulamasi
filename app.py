@@ -20,6 +20,7 @@ from analysis import (
     rows_to_table,
 )
 from backtest import aggregate_backtests, run_backtest
+from calibration import calibrate_model
 from data_import import (
     FIXTURE_REQUIRED_COLUMNS,
     REQUIRED_COLUMNS,
@@ -955,6 +956,10 @@ def render_backtest_page(client: Client) -> None:
             return
         if mode == "Toplu lig":
             result = aggregate_backtests(league_results)
+            try:
+                result["calibration"] = calibrate_model(result["calibration_leagues"])
+            except Exception as exc:
+                result["calibration_error"] = str(exc)
             result["league_errors"] = league_errors
             title = f"{result['league_count']} lig · toplam {result['tested']} maç"
         else:
@@ -1078,6 +1083,93 @@ def render_backtest_page(client: Client) -> None:
             "Bu tablo geçmiş performans simülasyonudur; gelecekte kâr veya kazanç garantisi değildir."
         )
         st.dataframe(profit_frame, use_container_width=True, hide_index=True)
+
+    calibration = result.get("calibration")
+    if isinstance(calibration, dict):
+        st.divider()
+        st.markdown("### 🎯 70/30 olasılık kalibrasyonu")
+        st.info(
+            "Ağırlıklar yalnızca eski %70 bölümünde öğrenildi. Aşağıdaki ana karşılaştırma, "
+            "ayar sırasında hiç kullanılmayan en yeni %30 maç üzerinde yapıldı."
+        )
+        split_frame = pd.DataFrame(calibration.get("split_summary") or [])
+        if not split_frame.empty:
+            st.markdown("#### Liglere göre eğitim ve sınav ayrımı")
+            st.dataframe(split_frame, use_container_width=True, hide_index=True)
+
+        weights_frame = pd.DataFrame(calibration.get("weights") or [])
+        if not weights_frame.empty:
+            weights_frame["Öğrenilen ağırlık"] = weights_frame["Öğrenilen ağırlık"].map(
+                lambda value: f"{value * 100:.1f}%"
+            )
+            st.markdown("#### Eski %70 bölümünde öğrenilen ağırlıklar")
+            st.dataframe(weights_frame, use_container_width=True, hide_index=True)
+            st.caption(
+                f"Olasılık yumuşatma sıcaklığı: {float(calibration.get('temperature', 1)):.2f} · "
+                "1'in üzerindeki değer, aşırı güveni azaltır."
+            )
+
+        def format_evaluation(rows: list[dict[str, object]]) -> pd.DataFrame:
+            frame = pd.DataFrame(rows)
+            if frame.empty:
+                return frame
+            for column in ("Doğruluk", "Ortalama güven", "ROI"):
+                frame[column] = frame[column].map(
+                    lambda value: (
+                        f"{float(value) * 100:+.1f}%"
+                        if column == "ROI"
+                        else f"{float(value) * 100:.1f}%"
+                    )
+                )
+            for column in ("Brier", "Log loss"):
+                frame[column] = frame[column].map(lambda value: f"{float(value):.4f}")
+            frame["Ortalama oran"] = frame["Ortalama oran"].map(
+                lambda value: f"{float(value):.2f}"
+            )
+            frame["Net sonuç"] = frame["Net sonuç"].map(
+                lambda value: f"{float(value):+,.1f} birim"
+            )
+            return frame
+
+        st.markdown("#### Dokunulmamış yeni %30 sınav sonucu")
+        st.caption("Brier ve Log loss değerlerinde daha düşük sonuç daha iyidir.")
+        holdout_frame = format_evaluation(calibration.get("holdout_comparison") or [])
+        st.dataframe(holdout_frame, use_container_width=True, hide_index=True)
+
+        with st.expander("Eski %70 eğitim bölümünün sonucunu göster"):
+            training_frame = format_evaluation(calibration.get("training_comparison") or [])
+            st.dataframe(training_frame, use_container_width=True, hide_index=True)
+
+        calibrated_value = pd.DataFrame(calibration.get("value_comparison") or [])
+        if not calibrated_value.empty:
+            calibrated_value["Ortalama oran"] = calibrated_value["Ortalama oran"].map(
+                lambda value: "—" if value is None or pd.isna(value) else f"{value:.2f}"
+            )
+            calibrated_value["Net sonuç"] = calibrated_value["Net sonuç"].map(
+                lambda value: f"{value:+,.1f} birim"
+            )
+            calibrated_value["ROI"] = calibrated_value["ROI"].map(
+                lambda value: "—" if value is None or pd.isna(value) else f"{value * 100:+.1f}%"
+            )
+            st.markdown("#### Yeni %30 bölümünde değer filtresi")
+            st.dataframe(calibrated_value, use_container_width=True, hide_index=True)
+
+        bins_frame = pd.DataFrame(calibration.get("calibration_bins") or [])
+        if not bins_frame.empty:
+            for column in ("Ortalama tahmin", "Gerçek başarı", "Kalibrasyon farkı"):
+                bins_frame[column] = bins_frame[column].map(
+                    lambda value: f"{value * 100:+.1f}%" if column == "Kalibrasyon farkı" else f"{value * 100:.1f}%"
+                )
+            st.markdown("#### Kalibre modelin güven kontrolü")
+            st.dataframe(bins_frame, use_container_width=True, hide_index=True)
+
+        if calibration.get("recommended"):
+            st.success(str(calibration.get("decision") or "Kalibrasyon sınavı başarılı."))
+        else:
+            st.warning(str(calibration.get("decision") or "Kalibrasyon sınavı yeterli değil."))
+        st.caption("Bu aşamada öğrenilen ağırlıklar canlı tahminlere otomatik uygulanmaz.")
+    elif result.get("calibration_error"):
+        st.warning(f"Kalibrasyon tamamlanamadı: {result['calibration_error']}")
 
     if result.get("details"):
         with st.expander("Test edilen maçların ayrıntılarını göster"):
