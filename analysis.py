@@ -8,6 +8,7 @@ import re
 from typing import Any, Callable
 import unicodedata
 from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 import pandas as pd
@@ -100,6 +101,20 @@ def _is_relevant_result(
     return _title_matches_team(title, away)
 
 
+def _canonical_source_url(value: str) -> str:
+    """Remove fragments and common tracking parameters before de-duplication."""
+    parts = urlsplit(value.strip())
+    ignored = {"gclid", "fbclid", "ref", "source"}
+    query = [
+        (key, item)
+        for key, item in parse_qsl(parts.query, keep_blank_values=True)
+        if not key.casefold().startswith("utm_") and key.casefold() not in ignored
+    ]
+    return urlunsplit(
+        (parts.scheme.casefold(), parts.netloc.casefold(), parts.path.rstrip("/"), urlencode(query), "")
+    )
+
+
 def _fetch_match_news(
     api_key: str,
     match: dict[str, Any],
@@ -140,9 +155,10 @@ def _fetch_match_news(
             if not _is_relevant_result(category, title, home, away):
                 continue
             url = str(result.get("url") or "").strip()
-            if not url or url in seen_urls:
+            canonical_url = _canonical_source_url(url)
+            if not canonical_url or canonical_url in seen_urls:
                 continue
-            seen_urls.add(url)
+            seen_urls.add(canonical_url)
             sources.append(
                 {
                     "category": category,
