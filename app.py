@@ -1154,6 +1154,25 @@ def render_backtest_page(client: Client) -> None:
             st.markdown("#### Yeni %30 bölümünde değer filtresi")
             st.dataframe(calibrated_value, use_container_width=True, hide_index=True)
 
+        value_band_frame = pd.DataFrame(
+            calibration.get("value_band_diagnostics") or []
+        )
+        if not value_band_frame.empty:
+            value_band_frame["Ortalama oran"] = value_band_frame["Ortalama oran"].map(
+                lambda value: "—" if value is None or pd.isna(value) else f"{float(value):.2f}"
+            )
+            value_band_frame["Net sonuç"] = value_band_frame["Net sonuç"].map(
+                lambda value: f"{float(value):+,.1f} birim"
+            )
+            value_band_frame["ROI"] = value_band_frame["ROI"].map(
+                lambda value: "—" if value is None or pd.isna(value) else f"{float(value) * 100:+.1f}%"
+            )
+            st.markdown("#### +3 değer seçimlerinin oran aralığı teşhisi")
+            st.caption(
+                "Yüksek oranlı sürpriz seçimlerin küçük olasılık hataları nedeniyle sonucu bozup bozmadığını gösterir."
+            )
+            st.dataframe(value_band_frame, use_container_width=True, hide_index=True)
+
         bins_frame = pd.DataFrame(calibration.get("calibration_bins") or [])
         if not bins_frame.empty:
             for column in ("Ortalama tahmin", "Gerçek başarı", "Kalibrasyon farkı"):
