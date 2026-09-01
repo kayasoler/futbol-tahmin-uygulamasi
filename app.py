@@ -21,7 +21,7 @@ from analysis import (
 )
 from backtest import aggregate_backtests, run_backtest
 from calibration import calibrate_model
-from api_football import fetch_fixtures
+from api_football import fetch_fixtures, normalize_api_keys
 from league_mapping import division_for_api_league, match_team_name
 from data_import import (
     FIXTURE_REQUIRED_COLUMNS,
@@ -869,24 +869,38 @@ def render_upcoming_page(client: Client) -> None:
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def get_api_football_fixtures(api_key: str, fixture_date: str) -> dict[str, object]:
-    return fetch_fixtures(api_key, fixture_date)
+def get_api_football_fixtures(api_keys: tuple[str, ...], fixture_date: str) -> dict[str, object]:
+    return fetch_fixtures(api_keys, fixture_date)
+
+
+def get_api_football_keys() -> tuple[str, ...]:
+    values: list[str] = []
+    try:
+        configured = st.secrets["API_FOOTBALL_KEYS"]
+        if isinstance(configured, str):
+            values.extend(normalize_api_keys(configured))
+        else:
+            values.extend(normalize_api_keys(list(configured)))
+    except (KeyError, FileNotFoundError, TypeError):
+        pass
+    try:
+        values.extend(normalize_api_keys(str(st.secrets["API_FOOTBALL_KEY"])))
+    except (KeyError, FileNotFoundError):
+        pass
+    return tuple(normalize_api_keys(values))
 
 
 def render_world_fixtures_page(client: Client) -> None:
     st.caption("Aşama 20 · API-Football dünya fikstürü ve tek tıkla analiz")
     st.subheader("🌍 Dünya Fikstürü")
-    try:
-        api_key = str(st.secrets["API_FOOTBALL_KEY"]).strip()
-    except (KeyError, FileNotFoundError):
+    api_keys = get_api_football_keys()
+    if not api_keys:
         st.info(
             "Dünya fikstürünü açmak için API-Football ücretsiz anahtarını Streamlit "
-            "Secrets alanına API_FOOTBALL_KEY adıyla ekleyin."
+            "Secrets alanına API_FOOTBALL_KEY veya API_FOOTBALL_KEYS adıyla ekleyin."
         )
         return
-    if not api_key:
-        st.warning("API_FOOTBALL_KEY boş görünüyor.")
-        return
+    st.caption(f"Hazır API-Football anahtarı: {len(api_keys)}")
 
     today = datetime.now(ZoneInfo("Europe/Istanbul")).date()
     fixture_date = st.date_input("Fikstür tarihi", value=today, key="api_fixture_date")
@@ -894,7 +908,7 @@ def render_world_fixtures_page(client: Client) -> None:
         with st.spinner("Dünya genelindeki fikstür alınıyor..."):
             try:
                 st.session_state["api_fixture_result"] = get_api_football_fixtures(
-                    api_key, fixture_date.isoformat()
+                    api_keys, fixture_date.isoformat()
                 )
                 st.session_state["api_fixture_result_date"] = fixture_date.isoformat()
             except Exception as exc:
@@ -916,7 +930,9 @@ def render_world_fixtures_page(client: Client) -> None:
     quota = result.get("quota") or {}
     remaining = quota.get("daily_remaining") if isinstance(quota, dict) else None
     if remaining is not None:
-        st.caption(f"API-Football günlük kalan istek: {remaining}")
+        key_number = quota.get("key_number") if isinstance(quota, dict) else None
+        key_label = f" · kullanılan anahtar: {key_number}" if key_number else ""
+        st.caption(f"API-Football günlük kalan istek: {remaining}{key_label}")
 
     available_divisions = set(fetch_recent_divisions(client))
     fixtures: list[dict[str, object]] = []
