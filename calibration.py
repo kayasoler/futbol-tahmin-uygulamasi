@@ -21,6 +21,7 @@ MIN_RELATIVE_BRIER_IMPROVEMENT = 0.01
 MIN_LOG_LOSS_IMPROVEMENT = 0.005
 MIN_VALUE_BETS = 30
 BOOTSTRAP_SAMPLES = 2000
+MIN_LEAGUE_IMPROVEMENT_SHARE = 2 / 3
 
 
 def _component_strength(name: str, sample: int) -> float:
@@ -342,6 +343,66 @@ def calibrate_model(
         for row in value_comparison
         if row["Yöntem"] == "Kalibre model" and row["Değer eşiği"] == "+3 puan"
     )
+
+    league_diagnostics: list[dict[str, Any]] = []
+    for league in calibration_leagues:
+        division = str(league.get("division") or "")
+        records = sorted(
+            list(league.get("records") or []),
+            key=lambda record: str(record.get("date") or ""),
+        )
+        if len(records) < 30:
+            continue
+        split = min(len(records) - 1, max(1, int(len(records) * train_ratio)))
+        try:
+            league_holdout = _prepare_records(records[split:])
+        except ValueError:
+            continue
+        league_calibrated_probabilities = _blend(
+            league_holdout["components"],
+            league_holdout["strengths"],
+            best_weights,
+            best_temperature,
+        )
+        league_current = _evaluate(
+            "Mevcut model",
+            league_holdout["current"],
+            league_holdout["actual"],
+            league_holdout["odds"],
+        )
+        league_calibrated = _evaluate(
+            "Kalibre model",
+            league_calibrated_probabilities,
+            league_holdout["actual"],
+            league_holdout["odds"],
+        )
+        league_value_rows = _value_rows(
+            "Kalibre model",
+            league_calibrated_probabilities,
+            league_holdout["actual"],
+            league_holdout["odds"],
+        )
+        plus_three = next(
+            row for row in league_value_rows if row["Değer eşiği"] == "+3 puan"
+        )
+        league_diagnostics.append(
+            {
+                "Lig": division,
+                "Sınav maçı": len(league_holdout["actual"]),
+                "Mevcut Brier": league_current["Brier"],
+                "Kalibre Brier": league_calibrated["Brier"],
+                "Brier iyileşmesi": league_current["Brier"] - league_calibrated["Brier"],
+                "Doğruluk farkı": league_calibrated["Doğruluk"] - league_current["Doğruluk"],
+                "Kalibre ROI": league_calibrated["ROI"],
+                "+3 değer bahsi": int(plus_three["Sanal bahis"]),
+                "+3 değer ROI": plus_three["ROI"],
+                "İyileşti": league_calibrated["Brier"] < league_current["Brier"],
+            }
+        )
+    improved_leagues = sum(bool(row["İyileşti"]) for row in league_diagnostics)
+    league_improvement_share = (
+        improved_leagues / len(league_diagnostics) if league_diagnostics else 0.0
+    )
     checks = [
         {
             "Kontrol": "Göreli Brier iyileşmesi",
@@ -373,6 +434,12 @@ def calibrate_model(
             "Eşik": MIN_VALUE_BETS,
             "Geçti": calibrated_value_bets >= MIN_VALUE_BETS,
         },
+        {
+            "Kontrol": "Ligler arası tutarlılık",
+            "Sonuç": league_improvement_share,
+            "Eşik": MIN_LEAGUE_IMPROVEMENT_SHARE,
+            "Geçti": league_improvement_share >= MIN_LEAGUE_IMPROVEMENT_SHARE,
+        },
     ]
     recommended = all(bool(check["Geçti"]) for check in checks)
     boundary_weights = [
@@ -391,6 +458,7 @@ def calibrate_model(
         "value_comparison": value_comparison,
         "calibration_bins": _calibration_bins(holdout_probabilities, holdout["actual"]),
         "robustness_checks": checks,
+        "league_diagnostics": league_diagnostics,
         "boundary_weights": boundary_weights,
         "recommended": recommended,
         "decision": (
