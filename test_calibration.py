@@ -2,7 +2,12 @@ import unittest
 
 import numpy as np
 
-from calibration import _bootstrap_improvement_probability, _fit_weights, _value_rows
+from calibration import (
+    _bootstrap_improvement_probability,
+    _fit_weights,
+    _value_band_rows,
+    _value_rows,
+)
 
 
 class CalibrationRobustnessTests(unittest.TestCase):
@@ -60,6 +65,17 @@ class CalibrationRobustnessTests(unittest.TestCase):
 
         self.assertAlmostEqual(float(weights.sum()), 1.0)
         self.assertIn(temperature, (0.8, 1.0, 1.2, 1.4, 1.6, 1.8))
+
+    def test_value_band_diagnostics_separate_longshots(self):
+        probabilities = np.array([[0.45, 0.30, 0.25], [0.55, 0.25, 0.20]])
+        odds = np.array([[1.80, 4.00, 6.00], [1.70, 3.50, 8.00]])
+        actual = np.array([1, 2])
+
+        rows = _value_band_rows(probabilities, actual, odds)
+        longshots = next(row for row in rows if row["Oran aralığı"] == "5.00+")
+
+        self.assertEqual(longshots["Sanal bahis"], 2)
+        self.assertEqual(longshots["Doğru"], 1)
 
 
 if __name__ == "__main__":
