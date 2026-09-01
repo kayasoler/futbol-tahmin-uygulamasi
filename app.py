@@ -16,6 +16,7 @@ from analysis import (
     fetch_team_form_rows,
     generate_gemini_grounded_analysis,
     h2h_summary_tables,
+    market_odds_context,
     odds_summary_table,
     odds_movement,
     totals_odds_movement,
@@ -590,6 +591,9 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
                 same_odds_all_rows=same_all_rows,
             )
             report["same_odds_all"] = same_all_rows
+            market_context = market_odds_context(match)
+            if market_context:
+                report["external_context"] = {"market_odds": market_context}
         except Exception as exc:
             st.error("Analiz verileri alınamadı.")
             st.code(str(exc))
@@ -758,11 +762,11 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
         with form_right:
             st.markdown(f"##### {away} · son 5")
             st.dataframe(pd.DataFrame(live_context.get("away_form") or []), use_container_width=True, hide_index=True)
-        report["external_context"] = {
+        report.setdefault("external_context", {}).update({
             "standings": standings_rows,
             "home_last_five": live_context.get("home_form") or [],
             "away_last_five": live_context.get("away_form") or [],
-        }
+        })
         match_id = int(live_context["match"]["id"])
         if st.button("Kesin kadroları kontrol et", key=f"highlightly_lineups_{match_id}", use_container_width=True):
             try:
