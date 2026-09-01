@@ -31,5 +31,8 @@ Onemli:
 - Seçilen maçın Bet365 oranı yalnızca kullanıcı istediğinde API'den alınır ve 30 dakika önbellekte tutulur.
 - Yaklaşık açılış oranı isteğe bağlıdır; boş bırakılırsa güncel oranla analiz devam eder.
 - Geçmiş oranlar birebir eşitlik yerine marjı temizlenmiş ±1,5 / ±3 / ±5 puan olasılık toleransıyla karşılaştırılır.
+- Aşama 23 ile güncel fikstür ve oranlar anahtarsız Football-Data fixtures.csv dosyasından 6 saatlik önbellekle alınır.
+- HIGHLIGHTLY_API_KEY varsa yalnızca seçilen maç için son beş form, puan durumu ve maç saatine yakın kesin kadro alınır.
+- Highlightly bağlamı rapora ve Gemini yorumuna eklenir; backtest yapılmadan sayısal model ağırlıklarını değiştirmez.
 - API fikstüründe yalnızca Supabase içinde tarihsel lig kodu bulunan maçlar gösterilir; desteklenmeyen ligler için ayrıntı alınmaz ve analiz yapılmaz.
 - API takım adları tarihsel CSV takım adlarıyla güvenilir biçimde eşleşmezse analiz güvenlik amacıyla durdurulur.
