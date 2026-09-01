@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from analysis import _canonical_source_url
+from analysis import _canonical_source_url, normalized_market_probabilities, odds_similarity_label
 
 from calibration import (
     _bootstrap_improvement_probability,
@@ -13,6 +13,12 @@ from calibration import (
 
 
 class CalibrationRobustnessTests(unittest.TestCase):
+    def test_odds_similarity_uses_probability_points(self):
+        probabilities = normalized_market_probabilities((1.70, 3.80, 5.20))
+        self.assertAlmostEqual(sum(probabilities), 1.0)
+        self.assertEqual(odds_similarity_label(0.0149), "Çok yakın")
+        self.assertEqual(odds_similarity_label(0.04), "Geniş")
+        self.assertIsNone(odds_similarity_label(0.051))
     def test_canonical_source_url_removes_tracking(self):
         first = _canonical_source_url("https://Example.com/news/?utm_source=x&id=1#part")
         second = _canonical_source_url("https://example.com/news?id=1")
