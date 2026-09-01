@@ -1212,6 +1212,38 @@ def render_backtest_page(client: Client) -> None:
                 hide_index=True,
             )
 
+        rolling_frame = pd.DataFrame(calibration.get("rolling_diagnostics") or [])
+        if not rolling_frame.empty:
+            rolling_frame["Eğitim oranı"] = rolling_frame["Eğitim oranı"].map(
+                lambda value: f"%{float(value) * 100:.0f}"
+            )
+            for column in ("Mevcut Brier", "Kalibre Brier"):
+                rolling_frame[column] = rolling_frame[column].map(
+                    lambda value: f"{float(value):.4f}"
+                )
+            for column in (
+                "Brier iyileşmesi",
+                "Doğruluk farkı",
+                "Kalibre ROI",
+                "+3 değer ROI",
+            ):
+                rolling_frame[column] = rolling_frame[column].map(
+                    lambda value: (
+                        "—"
+                        if value is None or pd.isna(value)
+                        else f"{float(value) * 100:+.1f}%"
+                    )
+                )
+            rolling_frame["Durum"] = rolling_frame["İyileşti"].map(
+                lambda improved: "✅ İyileşti" if improved else "❌ Geriledi"
+            )
+            rolling_frame = rolling_frame.drop(columns=["İyileşti"])
+            st.markdown("#### Genişleyen eğitimle üç dönemlik ileri sınav")
+            st.caption(
+                "Her satırda yalnızca daha eski maçlarda öğrenilen yeni ağırlıklar, hemen sonraki ve birbirini tekrar etmeyen dönemde sınanır."
+            )
+            st.dataframe(rolling_frame, use_container_width=True, hide_index=True)
+
         boundary_weights = calibration.get("boundary_weights") or []
         if boundary_weights:
             st.warning(
