@@ -23,6 +23,16 @@ from analysis import (
 from backtest import aggregate_backtests, run_backtest
 from calibration import calibrate_model
 from api_football import fetch_bet365_odds, fetch_fixtures, normalize_api_keys
+from football_data_live import fetch_current_fixtures
+from highlightly import (
+    fetch_last_five,
+    fetch_lineups,
+    fetch_match_day,
+    fetch_standings,
+    find_match,
+    form_rows,
+    selected_standings,
+)
 from league_mapping import division_for_api_league, match_team_name
 from data_import import (
     FIXTURE_REQUIRED_COLUMNS,
@@ -697,7 +707,65 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
         "Bu çıktı kesin sonuç veya kazanç garantisi değildir."
     )
 
-    st.markdown("#### 4. Canlı araştırma ve Gemini tahmini")
+    st.markdown("#### 4. Güncel takım ve oyuncu bağlamı")
+    try:
+        highlightly_api_key = str(st.secrets["HIGHLIGHTLY_API_KEY"]).strip()
+    except (KeyError, FileNotFoundError):
+        highlightly_api_key = ""
+    context_state_key = f"highlightly_context_{match.get('id')}"
+    if not highlightly_api_key:
+        st.info("Highlightly verileri için HIGHLIGHTLY_API_KEY tanımlanmalıdır.")
+    elif st.button("Güncel form ve puan durumunu getir", key=f"highlightly_context_button_{match.get('id')}", use_container_width=True):
+        with st.spinner("Highlightly takım eşleşmesi ve güncel veriler alınıyor..."):
+            try:
+                st.session_state[context_state_key] = get_highlightly_context(
+                    highlightly_api_key, str(match.get("match_date") or ""), home, away
+                )
+            except Exception as exc:
+                st.session_state[context_state_key] = {"error": str(exc)}
+    live_context = st.session_state.get(context_state_key)
+    if isinstance(live_context, dict) and live_context.get("error"):
+        st.warning("Highlightly verileri alınamadı.")
+        st.caption(str(live_context["error"]))
+    elif isinstance(live_context, dict) and live_context.get("match"):
+        st.success("Highlightly maçı ve takımları güvenilir biçimde eşleştirdi.")
+        standings_rows = live_context.get("standings") or []
+        if standings_rows:
+            st.markdown("##### Güncel puan durumu")
+            st.dataframe(pd.DataFrame(standings_rows), use_container_width=True, hide_index=True)
+        form_left, form_right = st.columns(2)
+        with form_left:
+            st.markdown(f"##### {home} · son 5")
+            st.dataframe(pd.DataFrame(live_context.get("home_form") or []), use_container_width=True, hide_index=True)
+        with form_right:
+            st.markdown(f"##### {away} · son 5")
+            st.dataframe(pd.DataFrame(live_context.get("away_form") or []), use_container_width=True, hide_index=True)
+        report["external_context"] = {
+            "standings": standings_rows,
+            "home_last_five": live_context.get("home_form") or [],
+            "away_last_five": live_context.get("away_form") or [],
+        }
+        match_id = int(live_context["match"]["id"])
+        if st.button("Kesin kadroları kontrol et", key=f"highlightly_lineups_{match_id}", use_container_width=True):
+            try:
+                st.session_state[f"highlightly_lineup_result_{match_id}"] = get_highlightly_lineups(highlightly_api_key, match_id)
+            except Exception as exc:
+                st.session_state[f"highlightly_lineup_result_{match_id}"] = {"error": str(exc)}
+        lineup_result = st.session_state.get(f"highlightly_lineup_result_{match_id}")
+        if isinstance(lineup_result, dict) and lineup_result.get("error"):
+            st.caption("Kadrolar henüz yayımlanmamış olabilir: " + str(lineup_result["error"]))
+        elif lineup_result:
+            for side_key, side_label in (("homeTeam", "Ev sahibi kadrosu"), ("awayTeam", "Deplasman kadrosu")):
+                side = lineup_result.get(side_key) or {}
+                players = side.get("initialLineup") or []
+                if players:
+                    st.markdown(f"##### {side_label} · {side.get('formation') or '—'}")
+                    st.write(", ".join(str(player.get("name") or "") for player in players))
+            report["external_context"]["lineups"] = lineup_result
+    elif isinstance(live_context, dict):
+        st.info("Highlightly seçilen maçı güvenilir biçimde eşleştiremedi; yanlış takım verisi kullanılmadı.")
+
+    st.markdown("#### 5. Canlı araştırma ve Gemini tahmini")
     st.write(
         "Tavily yalnızca seçili maç ve takımlar için güncel kaynakları arar. Gemini, "
         "bu haberleri veritabanındaki istatistiklerle birleştirerek kendi tahminini üretir."
@@ -894,6 +962,81 @@ def get_api_football_keys() -> tuple[str, ...]:
     except (KeyError, FileNotFoundError):
         pass
     return tuple(normalize_api_keys(values))
+
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def get_football_data_fixtures() -> list[dict[str, object]]:
+    return fetch_current_fixtures()
+
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def get_highlightly_context(api_key: str, match_date: str, home: str, away: str) -> dict[str, object]:
+    match = find_match(fetch_match_day(api_key, match_date), home, away)
+    if not match:
+        return {"match": None}
+    home_id = int((match.get("homeTeam") or {}).get("id"))
+    away_id = int((match.get("awayTeam") or {}).get("id"))
+    league = match.get("league") or {}
+    league_id = league.get("id")
+    season = league.get("season")
+    standings = []
+    if league_id is not None and season is not None:
+        standings = selected_standings(
+            fetch_standings(api_key, int(league_id), int(season)), {home_id, away_id}
+        )
+    return {
+        "match": match,
+        "home_form": form_rows(fetch_last_five(api_key, home_id), home_id),
+        "away_form": form_rows(fetch_last_five(api_key, away_id), away_id),
+        "standings": standings,
+    }
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def get_highlightly_lineups(api_key: str, match_id: int) -> object:
+    return fetch_lineups(api_key, match_id)
+
+
+def render_football_data_fixtures_page(client: Client) -> None:
+    st.caption("Aşama 23 · Football-Data güncel fikstürü ve Highlightly canlı bağlamı")
+    st.subheader("🌍 Güncel Fikstür")
+    st.caption("Fikstür ve oranlar Football-Data.co.uk kaynağından alınır; API kotası harcanmaz.")
+    try:
+        fixtures = get_football_data_fixtures()
+    except Exception as exc:
+        st.error("Football-Data güncel fikstürü alınamadı.")
+        st.caption(str(exc))
+        return
+    available_divisions = set(fetch_recent_divisions(client))
+    supported = [row for row in fixtures if str(row.get("division")) in available_divisions]
+    if not supported:
+        st.warning("Güncel dosyada geçmiş verimizle eşleşen fikstür bulunamadı.")
+        return
+    dates = sorted({str(row["match_date"]) for row in supported})
+    selected_date = st.selectbox("Fikstür tarihi", dates, index=0)
+    date_rows = [row for row in supported if row["match_date"] == selected_date]
+    divisions = sorted({str(row["division"]) for row in date_rows})
+    selected_divisions = st.multiselect("Lig filtresi", divisions)
+    visible = [row for row in date_rows if not selected_divisions or row["division"] in selected_divisions]
+    st.metric("Gösterilen maç", len(visible))
+    table = pd.DataFrame([{
+        "Saat": row.get("kickoff_time") or "—", "Lig": row["division"],
+        "Ev sahibi": row["home_team"], "Deplasman": row["away_team"],
+        "Bet365 1": row.get("b365_home") or "—", "Bet365 X": row.get("b365_draw") or "—",
+        "Bet365 2": row.get("b365_away") or "—",
+    } for row in visible])
+    event = st.dataframe(table, use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single-row", key="football_data_fixture_selector")
+    selected_rows = getattr(getattr(event, "selection", None), "rows", [])
+    if selected_rows:
+        index = int(selected_rows[0])
+        if 0 <= index < len(visible):
+            match = dict(visible[index])
+            with st.expander("İsteğe bağlı yaklaşık Bet365 açılış oranı"):
+                columns = st.columns(3)
+                match["opening_b365_home"] = columns[0].number_input("Açılış 1", min_value=0.0, value=0.0, step=0.01, key=f"fd_open_h_{match['id']}") or None
+                match["opening_b365_draw"] = columns[1].number_input("Açılış X", min_value=0.0, value=0.0, step=0.01, key=f"fd_open_d_{match['id']}") or None
+                match["opening_b365_away"] = columns[2].number_input("Açılış 2", min_value=0.0, value=0.0, step=0.01, key=f"fd_open_a_{match['id']}") or None
+            render_match_analysis(client, match)
 
 
 def render_world_fixtures_page(client: Client) -> None:
@@ -1547,7 +1690,7 @@ try:
     elif section == "Yaklaşan Maçlar":
         render_upcoming_page(supabase)
     elif section == "Dünya Fikstürü":
-        render_world_fixtures_page(supabase)
+        render_football_data_fixtures_page(supabase)
     else:
         render_backtest_page(supabase)
 except Exception as exc:
