@@ -2,7 +2,13 @@ import unittest
 
 import numpy as np
 
-from analysis import _canonical_source_url, normalized_market_probabilities, odds_similarity_label, totals_odds_movement
+from analysis import (
+    _canonical_source_url,
+    market_odds_context,
+    normalized_market_probabilities,
+    odds_similarity_label,
+    totals_odds_movement,
+)
 
 from calibration import (
     _bootstrap_improvement_probability,
@@ -18,6 +24,26 @@ class CalibrationRobustnessTests(unittest.TestCase):
         self.assertEqual(len(rows), 2)
         self.assertGreater(rows[0]["Hareket"], 0)
         self.assertAlmostEqual(sum(row["Güncel olasılık"] for row in rows), 1.0)
+
+    def test_manual_opening_odds_are_exposed_as_non_model_context(self):
+        context = market_odds_context({
+            "opening_b365_home": 1.90,
+            "opening_b365_draw": 3.50,
+            "opening_b365_away": 4.20,
+            "b365_home": 1.70,
+            "b365_draw": 3.80,
+            "b365_away": 5.20,
+            "opening_b365_over_25": 1.95,
+            "opening_b365_under_25": 1.85,
+            "b365_over_25": 1.80,
+            "b365_under_25": 2.00,
+        })
+        self.assertIn("piyasa", context["note"].casefold())
+        self.assertEqual(len(context["one_x_two"]["de_vigged_movement"]), 3)
+        self.assertEqual(len(context["total_2_5"]["de_vigged_movement"]), 2)
+
+    def test_empty_opening_odds_create_no_context(self):
+        self.assertEqual(market_odds_context({"b365_home": 1.70}), {})
     def test_odds_similarity_uses_probability_points(self):
         probabilities = normalized_market_probabilities((1.70, 3.80, 5.20))
         self.assertAlmostEqual(sum(probabilities), 1.0)
