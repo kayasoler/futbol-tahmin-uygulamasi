@@ -1,9 +1,12 @@
 import unittest
 
-from api_football import normalize_fixture
+from api_football import normalize_api_keys, normalize_fixture
 
 
 class ApiFootballTests(unittest.TestCase):
+    def test_normalizes_and_deduplicates_api_keys(self):
+        self.assertEqual(normalize_api_keys(" first,second;first "), ["first", "second"])
+
     def test_normalizes_fixture_for_analysis(self):
         row = normalize_fixture(
             {
