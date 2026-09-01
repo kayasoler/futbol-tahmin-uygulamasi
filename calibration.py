@@ -17,6 +17,10 @@ CURRENT_WEIGHTS /= CURRENT_WEIGHTS.sum()
 TEMPERATURES = (0.8, 1.0, 1.2, 1.4, 1.6, 1.8)
 VALUE_THRESHOLDS = (0.00, 0.03, 0.05, 0.10)
 STAKE = 100.0
+MIN_RELATIVE_BRIER_IMPROVEMENT = 0.01
+MIN_LOG_LOSS_IMPROVEMENT = 0.005
+MIN_VALUE_BETS = 30
+BOOTSTRAP_SAMPLES = 2000
 
 
 def _component_strength(name: str, sample: int) -> float:
@@ -134,6 +138,23 @@ def _brier(probabilities: np.ndarray, actual: np.ndarray) -> float:
 def _log_loss(probabilities: np.ndarray, actual: np.ndarray) -> float:
     chosen = np.clip(probabilities[np.arange(len(actual)), actual], 1e-12, 1)
     return float(-np.mean(np.log(chosen)))
+
+
+def _bootstrap_improvement_probability(
+    current_probabilities: np.ndarray,
+    calibrated_probabilities: np.ndarray,
+    actual: np.ndarray,
+) -> float:
+    """Estimate how often calibration improves mean Brier loss on resampled matches."""
+    targets = np.eye(3, dtype=float)[actual]
+    current_loss = np.sum((current_probabilities - targets) ** 2, axis=1)
+    calibrated_loss = np.sum((calibrated_probabilities - targets) ** 2, axis=1)
+    improvement = current_loss - calibrated_loss
+    if not len(improvement):
+        return 0.0
+    rng = np.random.default_rng(20260901)
+    indices = rng.integers(0, len(improvement), size=(BOOTSTRAP_SAMPLES, len(improvement)))
+    return float((improvement[indices].mean(axis=1) > 0).mean())
 
 
 def _evaluate(
@@ -298,10 +319,10 @@ def calibrate_model(
     current = comparison_lookup["Mevcut model"]
     calibrated = comparison_lookup["Kalibre model"]
     market = comparison_lookup["Bet365 olasılıkları"]
-    recommended = (
-        calibrated["Brier"] < current["Brier"]
-        and calibrated["Log loss"] < current["Log loss"]
-        and calibrated["Brier"] <= market["Brier"]
+    relative_brier_improvement = (current["Brier"] - calibrated["Brier"]) / current["Brier"]
+    log_loss_improvement = current["Log loss"] - calibrated["Log loss"]
+    bootstrap_probability = _bootstrap_improvement_probability(
+        holdout["current"], holdout_probabilities, holdout["actual"]
     )
 
     weights_table = [
@@ -313,6 +334,49 @@ def calibrate_model(
     ) + _value_rows(
         "Kalibre model", holdout_probabilities, holdout["actual"], holdout["odds"]
     )
+    calibrated_value_bets = sum(
+        int(row["Sanal bahis"])
+        for row in value_comparison
+        if row["Yöntem"] == "Kalibre model" and row["Değer eşiği"] == "+3 puan"
+    )
+    checks = [
+        {
+            "Kontrol": "Göreli Brier iyileşmesi",
+            "Sonuç": relative_brier_improvement,
+            "Eşik": MIN_RELATIVE_BRIER_IMPROVEMENT,
+            "Geçti": relative_brier_improvement >= MIN_RELATIVE_BRIER_IMPROVEMENT,
+        },
+        {
+            "Kontrol": "Log loss iyileşmesi",
+            "Sonuç": log_loss_improvement,
+            "Eşik": MIN_LOG_LOSS_IMPROVEMENT,
+            "Geçti": log_loss_improvement >= MIN_LOG_LOSS_IMPROVEMENT,
+        },
+        {
+            "Kontrol": "Bootstrap güveni",
+            "Sonuç": bootstrap_probability,
+            "Eşik": 0.95,
+            "Geçti": bootstrap_probability >= 0.95,
+        },
+        {
+            "Kontrol": "Bet365 Brier seviyesi",
+            "Sonuç": calibrated["Brier"],
+            "Eşik": market["Brier"],
+            "Geçti": calibrated["Brier"] <= market["Brier"],
+        },
+        {
+            "Kontrol": "+3 değer bahsi örneklemi",
+            "Sonuç": calibrated_value_bets,
+            "Eşik": MIN_VALUE_BETS,
+            "Geçti": calibrated_value_bets >= MIN_VALUE_BETS,
+        },
+    ]
+    recommended = all(bool(check["Geçti"]) for check in checks)
+    boundary_weights = [
+        COMPONENTS[index]
+        for index, weight in enumerate(best_weights)
+        if weight in {0.0, 0.8}
+    ]
     return {
         "training_count": len(training["actual"]),
         "holdout_count": len(holdout["actual"]),
@@ -323,10 +387,12 @@ def calibrate_model(
         "holdout_comparison": holdout_comparison,
         "value_comparison": value_comparison,
         "calibration_bins": _calibration_bins(holdout_probabilities, holdout["actual"]),
+        "robustness_checks": checks,
+        "boundary_weights": boundary_weights,
         "recommended": recommended,
         "decision": (
-            "Kalibre ağırlıklar dokunulmamış sınav bölümünde olasılık kalitesini iyileştirdi."
+            "Kalibre ağırlıklar tüm sağlamlık kontrollerini geçti; yine de canlıya almadan önce yeni bir dönem testinde doğrulanmalı."
             if recommended
-            else "Kalibre ağırlıklar dokunulmamış sınav bölümünde Bet365'i güvenilir biçimde geçemedi; canlı modele uygulanmamalı."
+            else "Kalibre ağırlıklar bazı ölçümlerde iyileşse de istatistiksel sağlamlık kontrollerinin tamamını geçemedi; canlı modele uygulanmamalı."
         ),
     }
