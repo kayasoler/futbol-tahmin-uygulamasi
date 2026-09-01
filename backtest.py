@@ -207,6 +207,7 @@ def run_backtest(
         model_odds = _number(target.get(RESULT_ODDS_COLUMNS.get(predicted_ms, "")))
         model_net: float | None = None
         value_edge: float | None = None
+        value_result: str | None = None
         if model_odds is not None and model_odds > 1:
             model_net = _record_bet(
                 bet_groups["Model · tüm güvenler"], model_odds, ms_is_correct
@@ -218,14 +219,23 @@ def run_backtest(
                 _record_bet(
                     bet_groups["Model · Yüksek + Orta"], model_odds, ms_is_correct
                 )
-            selected_probability = _number(
-                (predictions.get("ms_probabilities") or {}).get(predicted_ms)
+
+        probabilities = predictions.get("ms_probabilities") or {}
+        value_candidates: list[tuple[float, str, float]] = []
+        for result_code, odds_column in RESULT_ODDS_COLUMNS.items():
+            probability = _number(probabilities.get(result_code))
+            result_odds_value = _number(target.get(odds_column))
+            if probability is None or result_odds_value is None or result_odds_value <= 1:
+                continue
+            value_candidates.append(
+                (probability - (1 / result_odds_value), result_code, result_odds_value)
             )
-            if selected_probability is not None:
-                value_edge = selected_probability - (1 / model_odds)
-                for threshold in VALUE_THRESHOLDS:
-                    if value_edge >= threshold:
-                        _record_bet(value_groups[threshold], model_odds, ms_is_correct)
+        if value_candidates:
+            value_edge, value_result, value_odds = max(value_candidates, key=lambda item: item[0])
+            value_won = value_result == actual_ms
+            for threshold in VALUE_THRESHOLDS:
+                if value_edge >= threshold:
+                    _record_bet(value_groups[threshold], value_odds, value_won)
 
         result_odds = {
             result: _number(target.get(column))
@@ -272,6 +282,7 @@ def run_backtest(
                 "Güven": confidence,
                 "Model MS oranı": f"{model_odds:.2f}" if model_odds is not None else "—",
                 "Değer farkı": f"{value_edge * 100:+.1f} puan" if value_edge is not None else "—",
+                "Değer seçimi": value_result or "—",
                 "100 birim net": f"{model_net:+.1f}" if model_net is not None else "—",
                 "MS": "✓" if ms_is_correct else "✗",
                 "2.5": total_results["2.5"],
