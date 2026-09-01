@@ -21,6 +21,7 @@ from analysis import (
 )
 from backtest import aggregate_backtests, run_backtest
 from calibration import calibrate_model
+from api_football import fetch_fixtures
 from data_import import (
     FIXTURE_REQUIRED_COLUMNS,
     REQUIRED_COLUMNS,
@@ -866,6 +867,126 @@ def render_upcoming_page(client: Client) -> None:
         render_upcoming_list_tab(client, today)
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_api_football_fixtures(api_key: str, fixture_date: str) -> dict[str, object]:
+    return fetch_fixtures(api_key, fixture_date)
+
+
+def render_world_fixtures_page(client: Client) -> None:
+    st.caption("Aşama 20 · API-Football dünya fikstürü ve tek tıkla analiz")
+    st.subheader("🌍 Dünya Fikstürü")
+    try:
+        api_key = str(st.secrets["API_FOOTBALL_KEY"]).strip()
+    except (KeyError, FileNotFoundError):
+        st.info(
+            "Dünya fikstürünü açmak için API-Football ücretsiz anahtarını Streamlit "
+            "Secrets alanına API_FOOTBALL_KEY adıyla ekleyin."
+        )
+        return
+    if not api_key:
+        st.warning("API_FOOTBALL_KEY boş görünüyor.")
+        return
+
+    today = datetime.now(ZoneInfo("Europe/Istanbul")).date()
+    fixture_date = st.date_input("Fikstür tarihi", value=today, key="api_fixture_date")
+    if st.button("Bu tarihin tüm fikstürünü getir", type="primary", use_container_width=True):
+        with st.spinner("Dünya genelindeki fikstür alınıyor..."):
+            try:
+                st.session_state["api_fixture_result"] = get_api_football_fixtures(
+                    api_key, fixture_date.isoformat()
+                )
+                st.session_state["api_fixture_result_date"] = fixture_date.isoformat()
+            except Exception as exc:
+                st.session_state["api_fixture_result"] = {"error": str(exc)}
+
+    result = st.session_state.get("api_fixture_result")
+    if not isinstance(result, dict):
+        st.caption("Tarihi seçip fikstürü getirin. Bir saat içinde aynı tarih tekrar API kotası harcamaz.")
+        return
+    if result.get("error"):
+        st.error("API-Football fikstürü alınamadı.")
+        st.code(str(result["error"]))
+        return
+
+    fixtures = list(result.get("fixtures") or [])
+    if not fixtures:
+        st.info("Seçilen tarihte API kapsamında maç bulunamadı.")
+        return
+    quota = result.get("quota") or {}
+    remaining = quota.get("daily_remaining") if isinstance(quota, dict) else None
+    if remaining is not None:
+        st.caption(f"API-Football günlük kalan istek: {remaining}")
+
+    countries = sorted({str(row["country"]) for row in fixtures}, key=str.casefold)
+    selected_countries = st.multiselect("Ülke filtresi", countries, key="api_countries")
+    country_rows = [
+        row for row in fixtures if not selected_countries or row["country"] in selected_countries
+    ]
+    leagues = sorted({str(row["league"]) for row in country_rows}, key=str.casefold)
+    selected_leagues = st.multiselect("Lig filtresi", leagues, key="api_leagues")
+    visible = [
+        row for row in country_rows if not selected_leagues or row["league"] in selected_leagues
+    ]
+
+    table = pd.DataFrame(
+        [
+            {
+                "Saat": row.get("kickoff_time") or "—",
+                "Ülke": row["country"],
+                "Lig": row["league"],
+                "Ev sahibi": row["home_team"],
+                "Deplasman": row["away_team"],
+                "Durum": row["status_text"],
+            }
+            for row in visible
+        ]
+    )
+    st.metric("Gösterilen maç", len(visible))
+    st.caption("Analiz başlatmak için bir maç satırına tıklayın.")
+    event = st.dataframe(
+        table,
+        use_container_width=True,
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        key="api_fixture_selector",
+    )
+    selected_rows = getattr(getattr(event, "selection", None), "rows", [])
+    if not selected_rows:
+        return
+    selected_index = int(selected_rows[0])
+    if not 0 <= selected_index < len(visible):
+        return
+    fixture = visible[selected_index]
+    divisions = fetch_recent_divisions(client)
+    if not divisions:
+        st.warning("Analiz için eşleştirilebilecek tarihsel lig verisi bulunamadı.")
+        return
+    st.markdown("#### Seçilen maçı analiz et")
+    st.write(f"**{fixture['home_team']} — {fixture['away_team']}**")
+    st.caption(
+        "API lig adları ile CSV lig kodları farklıdır. Tarihsel karşılaştırma için doğru lig kodunu seçin."
+    )
+    division = st.selectbox("Tarihsel veri lig kodu", divisions, key="api_analysis_division")
+    analysis_match = {
+        "id": f"api-{fixture['api_fixture_id']}",
+        "division": division,
+        "match_date": fixture["match_date"],
+        "kickoff_time": fixture["kickoff_time"],
+        "home_team": fixture["home_team"],
+        "away_team": fixture["away_team"],
+        "b365_home": None,
+        "b365_draw": None,
+        "b365_away": None,
+        "b365_over_25": None,
+        "b365_under_25": None,
+        "entry_method": "api-football",
+        "match_status": fixture["status"],
+        "raw_data": fixture["raw_data"],
+    }
+    render_match_analysis(client, analysis_match)
+
+
 def render_backtest_page(client: Client) -> None:
     st.caption("Model doğrulama · Geçmiş maçlarda ileri yürüyen tarafsız test")
     st.subheader("🧪 İstatistiksel model backtesti")
@@ -1302,7 +1423,9 @@ require_login()
 
 with st.sidebar:
     section = st.radio(
-        "Bölüm", ["Geçmiş Veri", "Yaklaşan Maçlar", "Model Testi"], key="app_section"
+        "Bölüm",
+        ["Geçmiş Veri", "Yaklaşan Maçlar", "Dünya Fikstürü", "Model Testi"],
+        key="app_section",
     )
     st.caption("Maç analizi yapabilir veya modelin geçmiş performansını ölçebilirsiniz.")
 
@@ -1320,6 +1443,8 @@ try:
         render_historical_page(supabase)
     elif section == "Yaklaşan Maçlar":
         render_upcoming_page(supabase)
+    elif section == "Dünya Fikstürü":
+        render_world_fixtures_page(supabase)
     else:
         render_backtest_page(supabase)
 except Exception as exc:
