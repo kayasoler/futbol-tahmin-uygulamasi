@@ -1006,6 +1006,10 @@ def get_supported_divisions() -> list[str]:
 def get_highlightly_context(api_key: str, match_date: str, home: str, away: str) -> dict[str, object]:
     match = find_match(fetch_match_day(api_key, match_date), home, away)
     if not match:
+        match = find_match(
+            fetch_match_day(api_key, match_date, home, away), home, away
+        )
+    if not match:
         return {"match": None}
     home_id = int((match.get("homeTeam") or {}).get("id"))
     away_id = int((match.get("awayTeam") or {}).get("id"))
