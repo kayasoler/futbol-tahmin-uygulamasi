@@ -22,6 +22,7 @@ MIN_LOG_LOSS_IMPROVEMENT = 0.005
 MIN_VALUE_BETS = 30
 BOOTSTRAP_SAMPLES = 2000
 MIN_LEAGUE_IMPROVEMENT_SHARE = 2 / 3
+MIN_ROLLING_IMPROVEMENT_SHARE = 2 / 3
 
 
 def _component_strength(name: str, sample: int) -> float:
@@ -158,6 +159,82 @@ def _bootstrap_improvement_probability(
     return float((improvement[indices].mean(axis=1) > 0).mean())
 
 
+def _fit_weights(training: dict[str, np.ndarray]) -> tuple[np.ndarray, float]:
+    best_score = float("inf")
+    best_weights = CURRENT_WEIGHTS.copy()
+    best_temperature = 1.0
+    for weights in _candidate_weights():
+        for temperature in TEMPERATURES:
+            probabilities = _blend(
+                training["components"], training["strengths"], weights, temperature
+            )
+            regularization = 0.0005 * float(np.sum((weights - CURRENT_WEIGHTS) ** 2))
+            score = _brier(probabilities, training["actual"]) + regularization
+            if score < best_score:
+                best_score = score
+                best_weights = weights.copy()
+                best_temperature = temperature
+    return best_weights, best_temperature
+
+
+def _rolling_validation(
+    calibration_leagues: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Run three non-overlapping future tests with expanding training histories."""
+    windows = ((0.40, 0.60), (0.60, 0.80), (0.80, 1.00))
+    rows: list[dict[str, Any]] = []
+    for window_number, (train_end_ratio, test_end_ratio) in enumerate(windows, start=1):
+        training_records: list[dict[str, Any]] = []
+        test_records: list[dict[str, Any]] = []
+        for league in calibration_leagues:
+            records = sorted(
+                list(league.get("records") or []),
+                key=lambda record: str(record.get("date") or ""),
+            )
+            if len(records) < 30:
+                continue
+            train_end = max(1, int(len(records) * train_end_ratio))
+            test_end = min(len(records), max(train_end + 1, int(len(records) * test_end_ratio)))
+            training_records.extend(records[:train_end])
+            test_records.extend(records[train_end:test_end])
+        if not training_records or not test_records:
+            continue
+        try:
+            training = _prepare_records(training_records)
+            test = _prepare_records(test_records)
+        except ValueError:
+            continue
+        weights, temperature = _fit_weights(training)
+        calibrated_probabilities = _blend(
+            test["components"], test["strengths"], weights, temperature
+        )
+        current = _evaluate("Mevcut model", test["current"], test["actual"], test["odds"])
+        calibrated = _evaluate(
+            "Kalibre model", calibrated_probabilities, test["actual"], test["odds"]
+        )
+        value_rows = _value_rows(
+            "Kalibre model", calibrated_probabilities, test["actual"], test["odds"]
+        )
+        plus_three = next(row for row in value_rows if row["Değer eşiği"] == "+3 puan")
+        rows.append(
+            {
+                "Dönem": f"İleri sınav {window_number}",
+                "Eğitim oranı": train_end_ratio,
+                "Sınav aralığı": f"%{train_end_ratio * 100:.0f}–%{test_end_ratio * 100:.0f}",
+                "Sınav maçı": len(test["actual"]),
+                "Mevcut Brier": current["Brier"],
+                "Kalibre Brier": calibrated["Brier"],
+                "Brier iyileşmesi": current["Brier"] - calibrated["Brier"],
+                "Doğruluk farkı": calibrated["Doğruluk"] - current["Doğruluk"],
+                "Kalibre ROI": calibrated["ROI"],
+                "+3 değer bahsi": int(plus_three["Sanal bahis"]),
+                "+3 değer ROI": plus_three["ROI"],
+                "İyileşti": calibrated["Brier"] < current["Brier"],
+            }
+        )
+    return rows
+
+
 def _evaluate(
     name: str,
     probabilities: np.ndarray,
@@ -289,20 +366,7 @@ def calibrate_model(
 
     training = _prepare_records(training_records)
     holdout = _prepare_records(holdout_records)
-    best_score = float("inf")
-    best_weights = CURRENT_WEIGHTS.copy()
-    best_temperature = 1.0
-    for weights in _candidate_weights():
-        for temperature in TEMPERATURES:
-            probabilities = _blend(
-                training["components"], training["strengths"], weights, temperature
-            )
-            regularization = 0.0005 * float(np.sum((weights - CURRENT_WEIGHTS) ** 2))
-            score = _brier(probabilities, training["actual"]) + regularization
-            if score < best_score:
-                best_score = score
-                best_weights = weights.copy()
-                best_temperature = temperature
+    best_weights, best_temperature = _fit_weights(training)
 
     trained_probabilities = _blend(
         training["components"], training["strengths"], best_weights, best_temperature
@@ -403,6 +467,11 @@ def calibrate_model(
     league_improvement_share = (
         improved_leagues / len(league_diagnostics) if league_diagnostics else 0.0
     )
+    rolling_diagnostics = _rolling_validation(calibration_leagues)
+    improved_windows = sum(bool(row["İyileşti"]) for row in rolling_diagnostics)
+    rolling_improvement_share = (
+        improved_windows / len(rolling_diagnostics) if rolling_diagnostics else 0.0
+    )
     checks = [
         {
             "Kontrol": "Göreli Brier iyileşmesi",
@@ -440,6 +509,12 @@ def calibrate_model(
             "Eşik": MIN_LEAGUE_IMPROVEMENT_SHARE,
             "Geçti": league_improvement_share >= MIN_LEAGUE_IMPROVEMENT_SHARE,
         },
+        {
+            "Kontrol": "Dönemler arası tutarlılık",
+            "Sonuç": rolling_improvement_share,
+            "Eşik": MIN_ROLLING_IMPROVEMENT_SHARE,
+            "Geçti": rolling_improvement_share >= MIN_ROLLING_IMPROVEMENT_SHARE,
+        },
     ]
     recommended = all(bool(check["Geçti"]) for check in checks)
     boundary_weights = [
@@ -459,6 +534,7 @@ def calibrate_model(
         "calibration_bins": _calibration_bins(holdout_probabilities, holdout["actual"]),
         "robustness_checks": checks,
         "league_diagnostics": league_diagnostics,
+        "rolling_diagnostics": rolling_diagnostics,
         "boundary_weights": boundary_weights,
         "recommended": recommended,
         "decision": (
