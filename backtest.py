@@ -126,7 +126,13 @@ def run_backtest(
         if _number(row.get("full_time_home_goals")) is None or _number(row.get("full_time_away_goals")) is None:
             continue
         dated_rows.append((pd.Timestamp(match_date), row))
-    dated_rows.sort(key=lambda item: item[0])
+    dated_rows.sort(
+        key=lambda item: (
+            item[0],
+            _team_key(item[1].get("home_team")),
+            _team_key(item[1].get("away_team")),
+        )
+    )
 
     eligible: list[tuple[pd.Timestamp, dict[str, Any]]] = []
     for index, item in enumerate(dated_rows):
