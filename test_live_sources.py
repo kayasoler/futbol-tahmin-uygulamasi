@@ -3,10 +3,13 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from football_data_live import parse_fixtures_csv
-from highlightly import find_match
+from highlightly import REQUEST_HEADERS, find_match
 
 
 class LiveSourceTests(unittest.TestCase):
+    def test_highlightly_request_has_browser_signature(self):
+        self.assertIn("Mozilla/5.0", REQUEST_HEADERS["User-Agent"])
+        self.assertEqual(REQUEST_HEADERS["Accept"], "application/json, text/plain, */*")
     def test_parses_football_data_fixture(self):
         rows = parse_fixtures_csv(
             b"Div,Date,Time,HomeTeam,AwayTeam,B365H,B365D,B365A\nE0,02/09/2026,20:00,West Ham,Wolves,1.70,3.80,5.20\n",
