@@ -19,6 +19,7 @@ from analysis import (
     odds_summary_table,
     rows_to_table,
 )
+from backtest import run_backtest
 from data_import import (
     FIXTURE_REQUIRED_COLUMNS,
     REQUIRED_COLUMNS,
@@ -125,6 +126,30 @@ def fetch_team_catalog(client: Client) -> tuple[list[str], list[str]]:
         start += page_size
 
     return sorted(teams, key=str.casefold), sorted(divisions, key=str.casefold)
+
+
+def fetch_recent_divisions(client: Client, maximum_rows: int = 5000) -> list[str]:
+    """Build a practical league list from the most recent completed matches."""
+    divisions: set[str] = set()
+    page_size = 1000
+    for start in range(0, maximum_rows, page_size):
+        rows = (
+            client.table("historical_matches")
+            .select("division,match_date")
+            .order("match_date", desc=True)
+            .range(start, start + page_size - 1)
+            .execute()
+            .data
+            or []
+        )
+        divisions.update(
+            str(row["division"]).strip()
+            for row in rows
+            if row.get("division")
+        )
+        if len(rows) < page_size:
+            break
+    return sorted(divisions, key=str.casefold)
 
 
 def is_duplicate_error(exc: Exception) -> bool:
@@ -840,6 +865,96 @@ def render_upcoming_page(client: Client) -> None:
         render_upcoming_list_tab(client, today)
 
 
+def render_backtest_page(client: Client) -> None:
+    st.caption("Model doğrulama · Geçmiş maçlarda ileri yürüyen tarafsız test")
+    st.subheader("🧪 İstatistiksel model backtesti")
+    st.write(
+        "Her maç, yalnızca o maçtan önce oynanmış karşılaşmalar kullanılarak yeniden tahmin edilir. "
+        "Gerçek sonuç daha sonra tahminle karşılaştırılır."
+    )
+    st.info(
+        "Bu test istatistiksel modeli ölçer. Geçmiş tarihteki canlı haberleri güvenilir biçimde "
+        "yeniden oluşturamadığımız için Gemini ve Tavily teste dahil edilmez."
+    )
+
+    try:
+        divisions = fetch_recent_divisions(client)
+    except Exception as exc:
+        st.error("Lig listesi alınamadı.")
+        st.code(str(exc))
+        return
+    if not divisions:
+        st.warning("Backtest yapılabilecek lig bulunamadı.")
+        return
+
+    left, right = st.columns(2)
+    with left:
+        division = st.selectbox("Test edilecek lig", divisions, key="backtest_division")
+    with right:
+        test_size = st.selectbox(
+            "Test edilecek son maç sayısı",
+            [50, 100, 200, 300],
+            index=3,
+            key="backtest_size",
+        )
+
+    if st.button("Backtesti başlat", type="primary", use_container_width=True):
+        progress = st.progress(0, text="Lig verileri hazırlanıyor...")
+        try:
+            league_rows = fetch_league_rows(client, division)
+
+            def update_progress(done: int, total: int) -> None:
+                progress.progress(
+                    min(1.0, done / max(1, total)),
+                    text=f"Tahminler sınanıyor: {done}/{total}",
+                )
+
+            result = run_backtest(
+                league_rows,
+                test_size=int(test_size),
+                progress_callback=update_progress,
+            )
+            st.session_state["backtest_result"] = result
+            st.session_state["backtest_result_title"] = f"{division} · son {result['tested']} maç"
+            progress.empty()
+        except Exception as exc:
+            progress.empty()
+            st.error("Backtest tamamlanamadı.")
+            st.code(str(exc))
+            return
+
+    result = st.session_state.get("backtest_result")
+    if not result:
+        st.caption("Lig ve maç sayısını seçtikten sonra Backtesti başlat düğmesine basın.")
+        return
+
+    st.divider()
+    st.subheader(f"📋 Sonuçlar · {st.session_state.get('backtest_result_title', '')}")
+    metric_lookup = {row["Ölçüm"]: row for row in result["metrics"]}
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Test edilen maç", result["tested"])
+    c2.metric("MS başarısı", f"{metric_lookup['Maç sonucu']['Başarı'] * 100:.1f}%")
+    c3.metric("2.5 Alt/Üst", f"{metric_lookup['2.5 Alt/Üst']['Başarı'] * 100:.1f}%")
+    c4.metric("KG başarısı", f"{metric_lookup['Karşılıklı gol']['Başarı'] * 100:.1f}%")
+
+    metrics_frame = pd.DataFrame(result["metrics"])
+    metrics_frame["Başarı"] = metrics_frame["Başarı"].map(lambda value: f"{value * 100:.1f}%")
+    st.markdown("#### Pazar bazında başarı")
+    st.dataframe(metrics_frame, use_container_width=True, hide_index=True)
+
+    confidence_frame = pd.DataFrame(result["confidence_metrics"])
+    if not confidence_frame.empty:
+        confidence_frame["MS başarısı"] = confidence_frame["MS başarısı"].map(
+            lambda value: f"{value * 100:.1f}%"
+        )
+        st.markdown("#### Güven seviyesine göre maç sonucu başarısı")
+        st.dataframe(confidence_frame, use_container_width=True, hide_index=True)
+
+    with st.expander("Test edilen maçların ayrıntılarını göster"):
+        st.dataframe(pd.DataFrame(result["details"]), use_container_width=True, hide_index=True)
+    st.caption(result["note"])
+
+
 st.title("⚽ Futbol Tahmin ve Analiz")
 
 with st.sidebar:
@@ -855,9 +970,9 @@ require_login()
 
 with st.sidebar:
     section = st.radio(
-        "Bölüm", ["Geçmiş Veri", "Yaklaşan Maçlar"], key="app_section"
+        "Bölüm", ["Geçmiş Veri", "Yaklaşan Maçlar", "Model Testi"], key="app_section"
     )
-    st.caption("Maç satırına tıklayarak istatistiksel analiz başlatabilirsiniz.")
+    st.caption("Maç analizi yapabilir veya modelin geçmiş performansını ölçebilirsiniz.")
 
 try:
     supabase = get_supabase_client()
@@ -871,8 +986,10 @@ st.success("Supabase bağlantısı başarılı.")
 try:
     if section == "Geçmiş Veri":
         render_historical_page(supabase)
-    else:
+    elif section == "Yaklaşan Maçlar":
         render_upcoming_page(supabase)
+    else:
+        render_backtest_page(supabase)
 except Exception as exc:
     st.error("Ekran hazırlanırken beklenmeyen bir hata oluştu.")
     st.code(str(exc))
