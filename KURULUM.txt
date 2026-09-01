@@ -30,6 +30,7 @@ Onemli:
 - Birden fazla anahtar için API_FOOTBALL_KEYS = ["anahtar1", "anahtar2", "anahtar3"] kullanılabilir; kota veya anahtar hatasında sıradaki anahtar denenir.
 - Seçilen maçın Bet365 oranı yalnızca kullanıcı istediğinde API'den alınır ve 30 dakika önbellekte tutulur.
 - Yaklaşık açılış oranı isteğe bağlıdır; boş bırakılırsa güncel oranla analiz devam eder.
+- Manuel açılış alanları 1-X-2 ile birlikte Bet365 2.5 Üst/Alt oranlarını da kabul eder ve iki piyasanın hareketini marjdan arındırarak gösterir.
 - Geçmiş oranlar birebir eşitlik yerine marjı temizlenmiş ±1,5 / ±3 / ±5 puan olasılık toleransıyla karşılaştırılır.
 - Aşama 23 ile güncel fikstür ve oranlar anahtarsız Football-Data fixtures.csv dosyasından 6 saatlik önbellekle alınır.
 - HIGHLIGHTLY_API_KEY varsa yalnızca seçilen maç için son beş form, puan durumu ve maç saatine yakın kesin kadro alınır.
