@@ -1163,6 +1163,26 @@ def render_backtest_page(client: Client) -> None:
             st.markdown("#### Kalibre modelin güven kontrolü")
             st.dataframe(bins_frame, use_container_width=True, hide_index=True)
 
+        robustness_frame = pd.DataFrame(calibration.get("robustness_checks") or [])
+        if not robustness_frame.empty:
+            robustness_frame["Durum"] = robustness_frame["Geçti"].map(
+                lambda passed: "✅ Geçti" if passed else "❌ Geçemedi"
+            )
+            robustness_frame = robustness_frame.drop(columns=["Geçti"])
+            st.markdown("#### Canlı modele geçiş sağlamlık kontrolleri")
+            st.caption(
+                "Küçük metrik farklarının tesadüf olma ihtimali ve değer filtresinin örneklem büyüklüğü ayrıca denetlenir."
+            )
+            st.dataframe(robustness_frame, use_container_width=True, hide_index=True)
+
+        boundary_weights = calibration.get("boundary_weights") or []
+        if boundary_weights:
+            st.warning(
+                "Optimizasyon bazı ağırlıklarda arama sınırına dayandı: "
+                + ", ".join(map(str, boundary_weights))
+                + ". Bu durum kararsız veya aşırı piyasa ağırlıklı bir çözüme işaret edebilir."
+            )
+
         if calibration.get("recommended"):
             st.success(str(calibration.get("decision") or "Kalibrasyon sınavı başarılı."))
         else:
