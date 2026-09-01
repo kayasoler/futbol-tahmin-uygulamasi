@@ -24,6 +24,11 @@ from analysis import (
 )
 from backtest import aggregate_backtests, run_backtest
 from calibration import calibrate_model
+from analysis_store import (
+    load_latest_analysis,
+    save_analysis_version,
+    update_analysis_artifacts,
+)
 from api_football import fetch_bet365_odds, fetch_fixtures, normalize_api_keys
 from football_data_live import fetch_current_fixtures
 from highlightly import (
@@ -561,6 +566,20 @@ def render_manual_fixture_tab(client: Client, today) -> None:
 
 
 def render_match_analysis(client: Client, match: dict[str, object]) -> None:
+    requested_match = dict(match)
+    latest_analysis, storage_error = load_latest_analysis(client, requested_match)
+    refresh_key = f"force_analysis_refresh_{requested_match.get('id')}"
+    force_refresh = bool(st.session_state.pop(refresh_key, False))
+    if force_refresh:
+        st.session_state.pop(f"highlightly_context_{requested_match.get('id')}", None)
+        st.session_state.pop(f"tavily_gemini_analysis_v3_{requested_match.get('id')}", None)
+    if latest_analysis and not force_refresh:
+        stored_match = dict(latest_analysis.get("match_snapshot") or {})
+        stored_match["id"] = requested_match.get("id")
+        match = stored_match
+    else:
+        match = requested_match
+
     home = str(match.get("home_team") or "")
     away = str(match.get("away_team") or "")
     division = str(match.get("division") or "")
@@ -570,7 +589,18 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
         f"{division} · {match.get('match_date', '—')} · {match.get('kickoff_time', '—')}"
     )
 
-    if st.button("Analizi yenile", key=f"refresh_analysis_{match.get('id')}"):
+    if latest_analysis and not force_refresh:
+        st.success(
+            f"Kayıtlı analiz sürümü {latest_analysis.get('version')} kullanılıyor · "
+            f"{latest_analysis.get('analyzed_at', '—')}"
+        )
+        st.caption("Bu açılışta Highlightly, Tavily ve Gemini kotası harcanmaz.")
+    if st.button(
+        "Yeni oranlarla yeniden analiz et" if latest_analysis else "Analizi yenile",
+        key=f"refresh_analysis_{requested_match.get('id')}",
+        use_container_width=True,
+    ):
+        st.session_state[refresh_key] = True
         st.rerun()
 
     with st.spinner("Geçmiş rekabet ve aynı oran verileri hesaplanıyor..."):
@@ -599,6 +629,21 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
             st.code(str(exc))
             return
 
+    analysis_record = latest_analysis if latest_analysis and not force_refresh else None
+    if analysis_record:
+        stored_context = dict(analysis_record.get("external_context") or {})
+        if stored_context:
+            report.setdefault("external_context", {}).update(stored_context)
+    else:
+        analysis_record, save_error = save_analysis_version(client, match, report)
+        if save_error:
+            st.warning("Analiz veritabanına kaydedilemedi; bu oturumda çalışmaya devam eder.")
+            st.caption("Supabase'de supabase_match_analyses.sql dosyasını bir kez çalıştırın. Ayrıntı: " + save_error)
+        elif analysis_record:
+            st.success(f"Analiz sürümü {analysis_record.get('version', 1)} veritabanına kaydedildi.")
+    if storage_error and "match_analyses" in storage_error:
+        st.caption("Kalıcı analiz önbelleği henüz kurulmamış olabilir.")
+
     st.info(
         "İstatistiksel model geçmiş verilerle çalışır. Tavily güncel haberleri arar; "
         "Gemini bu kaynakları ve tüm istatistikleri birleştirerek kendi tahminini üretir."
@@ -613,7 +658,7 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
     else:
         st.info("Bu iki takım arasında veritabanında geçmiş karşılaşma bulunamadı.")
 
-    st.markdown("#### 2. Açılış–güncel oran hareketi")
+    st.markdown("#### 2. Açılış–analiz anı oran hareketi")
     movement_rows = odds_movement(
         tuple(match.get(column) for column in ("opening_b365_home", "opening_b365_draw", "opening_b365_away")),
         tuple(match.get(column) for column in ("b365_home", "b365_draw", "b365_away")),
@@ -624,11 +669,12 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
     ))
     if movement_rows:
         movement_frame = pd.DataFrame(movement_rows)
-        for column in ("Açılış olasılığı", "Güncel olasılık", "Hareket"):
+        movement_frame = movement_frame.rename(columns={"Güncel olasılık": "Analiz anı olasılığı"})
+        for column in ("Açılış olasılığı", "Analiz anı olasılığı", "Hareket"):
             movement_frame[column] = movement_frame[column].map(lambda value: f"{float(value) * 100:+.1f}%")
         st.dataframe(movement_frame, use_container_width=True, hide_index=True)
     else:
-        st.caption("Açılış oranları boşsa bu bölüm hesaplanmaz; ana analiz güncel oranlarla devam eder.")
+        st.caption("Açılış oranları boşsa bu bölüm hesaplanmaz; ana analiz mevcut referans oranıyla devam eder.")
 
     st.markdown("#### 3. Benzer Bet365 piyasa analizi")
     st.caption(
@@ -735,7 +781,23 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
     except (KeyError, FileNotFoundError):
         highlightly_api_key = ""
     context_state_key = f"highlightly_context_{match.get('id')}"
-    if not highlightly_api_key:
+    context_changed = False
+    stored_external = dict((analysis_record or {}).get("external_context") or {})
+    has_stored_team_context = any(
+        key in stored_external for key in ("standings", "home_last_five", "away_last_five")
+    )
+    if context_state_key not in st.session_state and any(
+        key in stored_external for key in ("standings", "home_last_five", "away_last_five")
+    ):
+        st.session_state[context_state_key] = {
+            "match": {"id": stored_external.get("highlightly_match_id") or 0},
+            "standings": stored_external.get("standings") or [],
+            "home_form": stored_external.get("home_last_five") or [],
+            "away_form": stored_external.get("away_last_five") or [],
+        }
+    if has_stored_team_context:
+        st.info("Kayıtlı takım bağlamı kullanılıyor; Highlightly çağrısı yapılmadı.")
+    elif not highlightly_api_key:
         st.info("Highlightly verileri için HIGHLIGHTLY_API_KEY tanımlanmalıdır.")
     elif st.button("Güncel form ve puan durumunu getir", key=f"highlightly_context_button_{match.get('id')}", use_container_width=True):
         with st.spinner("Highlightly takım eşleşmesi ve güncel veriler alınıyor..."):
@@ -743,6 +805,7 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
                 st.session_state[context_state_key] = get_highlightly_context(
                     highlightly_api_key, str(match.get("match_date") or ""), home, away
                 )
+                context_changed = True
             except Exception as exc:
                 st.session_state[context_state_key] = {"error": str(exc)}
     live_context = st.session_state.get(context_state_key)
@@ -766,11 +829,13 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
             "standings": standings_rows,
             "home_last_five": live_context.get("home_form") or [],
             "away_last_five": live_context.get("away_form") or [],
+            "highlightly_match_id": live_context.get("match", {}).get("id"),
         })
         match_id = int(live_context["match"]["id"])
-        if st.button("Kesin kadroları kontrol et", key=f"highlightly_lineups_{match_id}", use_container_width=True):
+        if match_id and st.button("Kesin kadroları kontrol et", key=f"highlightly_lineups_{match_id}", use_container_width=True):
             try:
                 st.session_state[f"highlightly_lineup_result_{match_id}"] = get_highlightly_lineups(highlightly_api_key, match_id)
+                context_changed = True
             except Exception as exc:
                 st.session_state[f"highlightly_lineup_result_{match_id}"] = {"error": str(exc)}
         lineup_result = st.session_state.get(f"highlightly_lineup_result_{match_id}")
@@ -784,6 +849,14 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
                     st.markdown(f"##### {side_label} · {side.get('formation') or '—'}")
                     st.write(", ".join(str(player.get("name") or "") for player in players))
             report["external_context"]["lineups"] = lineup_result
+        if context_changed:
+            artifact_error = update_analysis_artifacts(
+                client,
+                (analysis_record or {}).get("id"),
+                external_context=report.get("external_context") or {},
+            )
+            if artifact_error:
+                st.caption("Güncel takım bağlamı kalıcı önbelleğe yazılamadı: " + artifact_error)
     elif isinstance(live_context, dict):
         st.info("Highlightly seçilen maçı güvenilir biçimde eşleştiremedi; yanlış takım verisi kullanılmadı.")
 
@@ -801,7 +874,14 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
     except KeyError:
         tavily_api_key = ""
 
-    if not gemini_api_key or not tavily_api_key:
+    gemini_state_key = f"tavily_gemini_analysis_v3_{match.get('id')}"
+    if gemini_state_key not in st.session_state and (analysis_record or {}).get("gemini_result"):
+        st.session_state[gemini_state_key] = dict(analysis_record["gemini_result"])
+    has_stored_gemini = bool((analysis_record or {}).get("gemini_result"))
+    if has_stored_gemini:
+        st.info("Kayıtlı Tavily–Gemini analizi kullanılıyor; yeni kota harcanmadı.")
+
+    if (not gemini_api_key or not tavily_api_key) and not has_stored_gemini:
         missing_keys = []
         if not gemini_api_key:
             missing_keys.append("GEMINI_API_KEY")
@@ -811,58 +891,61 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
             "Canlı araştırma için eksik Streamlit Secrets anahtarı: "
             + ", ".join(missing_keys)
         )
-    else:
-        gemini_state_key = f"tavily_gemini_analysis_v3_{match.get('id')}"
-        if st.button(
-            "Güncel haberleri araştır ve Gemini tahmini oluştur",
-            key=f"tavily_gemini_button_{match.get('id')}",
-            use_container_width=True,
-        ):
+    elif not has_stored_gemini and st.button(
+                "Güncel haberleri araştır ve Gemini tahmini oluştur",
+                key=f"tavily_gemini_button_{match.get('id')}",
+                use_container_width=True,
+            ):
             with st.spinner(
                 "Tavily güncel kaynakları arıyor; Gemini tüm verileri yorumluyor..."
             ):
                 try:
-                    st.session_state[gemini_state_key] = (
-                        generate_gemini_grounded_analysis(
+                    generated_result = generate_gemini_grounded_analysis(
                             gemini_api_key,
                             tavily_api_key,
                             match,
                             report,
                         )
+                    st.session_state[gemini_state_key] = generated_result
+                    artifact_error = update_analysis_artifacts(
+                        client,
+                        (analysis_record or {}).get("id"),
+                        external_context=report.get("external_context") or {},
+                        gemini_result=generated_result,
                     )
+                    if artifact_error:
+                        st.session_state[gemini_state_key]["storage_warning"] = artifact_error
                 except Exception as exc:
                     st.session_state[gemini_state_key] = {"error": str(exc)}
             st.rerun()
 
-        gemini_result = st.session_state.get(gemini_state_key)
-        if isinstance(gemini_result, dict) and "error" in gemini_result:
-            st.error(
-                "Canlı araştırma tamamlanamadı. Tavily veya Gemini anahtarını ve "
-                "ücretsiz kullanım kotasını kontrol edin."
-            )
-            st.caption(str(gemini_result["error"]))
-        elif gemini_result:
-            st.markdown(str(gemini_result["text"]))
-            if gemini_result.get("model"):
-                st.caption(f"Kullanılan Gemini modeli: {gemini_result['model']}")
-            sources = gemini_result.get("sources") or []
-            if sources:
-                st.markdown("##### Tavily tarafından bulunan kaynaklar")
-                for number, source in enumerate(sources, start=1):
-                    title = str(source["title"]).replace("[", "(").replace("]", ")")
-                    category = str(source.get("category") or "Kaynak")
-                    st.markdown(
-                        f"{number}. **{category}:** [{title}]({source['url']})"
-                    )
-            search_warnings = gemini_result.get("search_warnings") or []
-            if search_warnings:
-                st.warning(
-                    "Bazı haber aramaları tamamlanamadı; mevcut kaynaklarla analiz yapıldı."
-                )
-            st.caption(
-                "Gemini tahminleri kesin sonuç veya kazanç garantisi değildir. "
-                "Kadro ve haberleri maç öncesinde kaynaklardan doğrulayın."
-            )
+    gemini_result = st.session_state.get(gemini_state_key)
+    if isinstance(gemini_result, dict) and "error" in gemini_result:
+        st.error(
+            "Canlı araştırma tamamlanamadı. Tavily veya Gemini anahtarını ve "
+            "ücretsiz kullanım kotasını kontrol edin."
+        )
+        st.caption(str(gemini_result["error"]))
+    elif gemini_result:
+        st.markdown(str(gemini_result["text"]))
+        if gemini_result.get("storage_warning"):
+            st.caption("Gemini sonucu kalıcı önbelleğe yazılamadı: " + str(gemini_result["storage_warning"]))
+        if gemini_result.get("model"):
+            st.caption(f"Kullanılan Gemini modeli: {gemini_result['model']}")
+        sources = gemini_result.get("sources") or []
+        if sources:
+            st.markdown("##### Tavily tarafından bulunan kaynaklar")
+            for number, source in enumerate(sources, start=1):
+                title = str(source["title"]).replace("[", "(").replace("]", ")")
+                category = str(source.get("category") or "Kaynak")
+                st.markdown(f"{number}. **{category}:** [{title}]({source['url']})")
+        search_warnings = gemini_result.get("search_warnings") or []
+        if search_warnings:
+            st.warning("Bazı haber aramaları tamamlanamadı; mevcut kaynaklarla analiz yapıldı.")
+        st.caption(
+            "Gemini tahminleri kesin sonuç veya kazanç garantisi değildir. "
+            "Kadro ve haberleri maç öncesinde kaynaklardan doğrulayın."
+        )
 
 
 def render_upcoming_list_tab(client: Client, today) -> None:
@@ -1068,8 +1151,8 @@ def render_football_data_fixtures_page(client: Client) -> None:
     table = pd.DataFrame([{
         "Saat": row.get("kickoff_time") or "—", "Lig": row["division"],
         "Ev sahibi": row["home_team"], "Deplasman": row["away_team"],
-        "Bet365 1": row.get("b365_home") or "—", "Bet365 X": row.get("b365_draw") or "—",
-        "Bet365 2": row.get("b365_away") or "—",
+        "FD referans 1": row.get("b365_home") or "—", "FD referans X": row.get("b365_draw") or "—",
+        "FD referans 2": row.get("b365_away") or "—",
     } for row in visible])
     event = st.dataframe(table, use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single-row", key="football_data_fixture_selector")
     selected_rows = getattr(getattr(event, "selection", None), "rows", [])
@@ -1077,6 +1160,13 @@ def render_football_data_fixtures_page(client: Client) -> None:
         index = int(selected_rows[0])
         if 0 <= index < len(visible):
             match = dict(visible[index])
+            csv_odds = {
+                "b365_home": match.get("b365_home"),
+                "b365_draw": match.get("b365_draw"),
+                "b365_away": match.get("b365_away"),
+                "b365_over_25": match.get("b365_over_25"),
+                "b365_under_25": match.get("b365_under_25"),
+            }
             with st.expander("İsteğe bağlı yaklaşık Bet365 açılış oranı"):
                 columns = st.columns(3)
                 match["opening_b365_home"] = columns[0].number_input("Açılış 1", min_value=0.0, value=0.0, step=0.01, key=f"fd_open_h_{match['id']}") or None
@@ -1085,6 +1175,27 @@ def render_football_data_fixtures_page(client: Client) -> None:
                 total_columns = st.columns(2)
                 match["opening_b365_over_25"] = total_columns[0].number_input("Açılış 2.5 Üst", min_value=0.0, value=0.0, step=0.01, key=f"fd_open_o25_{match['id']}") or None
                 match["opening_b365_under_25"] = total_columns[1].number_input("Açılış 2.5 Alt", min_value=0.0, value=0.0, step=0.01, key=f"fd_open_u25_{match['id']}") or None
+            with st.expander("Analiz anında gördüğünüz Bet365 oranları"):
+                st.caption(
+                    "Bir kez girmeniz yeterlidir. Üçlü MS veya ikili 2.5 grubunu eksiksiz girin; "
+                    "boş grup için Football-Data referans oranı kullanılır."
+                )
+                current_columns = st.columns(3)
+                current_home = current_columns[0].number_input("Analiz anı 1", min_value=0.0, value=0.0, step=0.01, key=f"fd_now_h_{match['id']}")
+                current_draw = current_columns[1].number_input("Analiz anı X", min_value=0.0, value=0.0, step=0.01, key=f"fd_now_d_{match['id']}")
+                current_away = current_columns[2].number_input("Analiz anı 2", min_value=0.0, value=0.0, step=0.01, key=f"fd_now_a_{match['id']}")
+                current_total_columns = st.columns(2)
+                current_over = current_total_columns[0].number_input("Analiz anı 2.5 Üst", min_value=0.0, value=0.0, step=0.01, key=f"fd_now_o25_{match['id']}")
+                current_under = current_total_columns[1].number_input("Analiz anı 2.5 Alt", min_value=0.0, value=0.0, step=0.01, key=f"fd_now_u25_{match['id']}")
+            for name, value in csv_odds.items():
+                match[f"csv_{name}"] = value
+            if all(value > 1 for value in (current_home, current_draw, current_away)):
+                match.update({"b365_home": current_home, "b365_draw": current_draw, "b365_away": current_away})
+                match["analysis_odds_source"] = "Manuel analiz anı oranı"
+            else:
+                match["analysis_odds_source"] = "Football-Data referans oranı"
+            if all(value > 1 for value in (current_over, current_under)):
+                match.update({"b365_over_25": current_over, "b365_under_25": current_under})
             render_match_analysis(client, match)
 
 
