@@ -306,6 +306,61 @@ def _value_rows(
     return rows
 
 
+def _value_band_rows(
+    probabilities: np.ndarray,
+    actual: np.ndarray,
+    odds: np.ndarray,
+    threshold: float = 0.03,
+) -> list[dict[str, Any]]:
+    """Diagnose whether apparent value is concentrated in risky long-shot prices."""
+    edges = probabilities - (1 / odds)
+    selected_results = edges.argmax(axis=1)
+    selected_edges = edges[np.arange(len(actual)), selected_results]
+    selected_odds = odds[np.arange(len(actual)), selected_results]
+    bands = (
+        ("1.01–1.99", 1.01, 2.00),
+        ("2.00–2.99", 2.00, 3.00),
+        ("3.00–4.99", 3.00, 5.00),
+        ("5.00+", 5.00, float("inf")),
+    )
+    rows: list[dict[str, Any]] = []
+    for label, lower, upper in bands:
+        selected = (
+            (selected_edges >= threshold)
+            & (selected_odds >= lower)
+            & (selected_odds < upper)
+        )
+        bets = int(selected.sum())
+        if not bets:
+            rows.append(
+                {
+                    "Oran aralığı": label,
+                    "Değer eşiği": f"+{threshold * 100:.0f} puan",
+                    "Sanal bahis": 0,
+                    "Doğru": 0,
+                    "Ortalama oran": None,
+                    "Net sonuç": 0.0,
+                    "ROI": None,
+                }
+            )
+            continue
+        won = selected_results[selected] == actual[selected]
+        chosen_odds = selected_odds[selected]
+        net = np.where(won, STAKE * (chosen_odds - 1), -STAKE)
+        rows.append(
+            {
+                "Oran aralığı": label,
+                "Değer eşiği": f"+{threshold * 100:.0f} puan",
+                "Sanal bahis": bets,
+                "Doğru": int(won.sum()),
+                "Ortalama oran": float(chosen_odds.mean()),
+                "Net sonuç": float(net.sum()),
+                "ROI": float(net.sum() / (bets * STAKE)),
+            }
+        )
+    return rows
+
+
 def _calibration_bins(
     probabilities: np.ndarray,
     actual: np.ndarray,
@@ -531,6 +586,9 @@ def calibrate_model(
         "training_comparison": training_comparison,
         "holdout_comparison": holdout_comparison,
         "value_comparison": value_comparison,
+        "value_band_diagnostics": _value_band_rows(
+            holdout_probabilities, holdout["actual"], holdout["odds"]
+        ),
         "calibration_bins": _calibration_bins(holdout_probabilities, holdout["actual"]),
         "robustness_checks": checks,
         "league_diagnostics": league_diagnostics,
