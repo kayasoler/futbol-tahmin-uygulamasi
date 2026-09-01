@@ -2,6 +2,8 @@ import unittest
 
 import numpy as np
 
+from analysis import _canonical_source_url
+
 from calibration import (
     _bootstrap_improvement_probability,
     _fit_weights,
@@ -11,6 +13,11 @@ from calibration import (
 
 
 class CalibrationRobustnessTests(unittest.TestCase):
+    def test_canonical_source_url_removes_tracking(self):
+        first = _canonical_source_url("https://Example.com/news/?utm_source=x&id=1#part")
+        second = _canonical_source_url("https://example.com/news?id=1")
+        self.assertEqual(first, second)
+
     def test_detects_consistent_improvement(self):
         actual = np.array([0, 1, 2] * 40)
         current = np.tile([0.45, 0.30, 0.25], (len(actual), 1))
