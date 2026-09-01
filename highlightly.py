@@ -80,8 +80,23 @@ def find_match(matches_payload: Any, home: str, away: str) -> dict[str, Any] | N
     return best[1] if best[0] >= 0.82 else None
 
 
-def fetch_match_day(api_key: str, match_date: str) -> Any:
-    return _get(api_key, "matches", {"date": match_date, "timezone": "Europe/Istanbul", "limit": 500})
+def fetch_match_day(
+    api_key: str,
+    match_date: str,
+    home_team_name: str | None = None,
+    away_team_name: str | None = None,
+) -> Any:
+    return _get(
+        api_key,
+        "matches",
+        {
+            "date": match_date,
+            "timezone": "Europe/Istanbul",
+            "homeTeamName": _name_key(home_team_name) if home_team_name else None,
+            "awayTeamName": _name_key(away_team_name) if away_team_name else None,
+            "limit": 100,
+        },
+    )
 
 
 def fetch_last_five(api_key: str, team_id: int) -> Any:
