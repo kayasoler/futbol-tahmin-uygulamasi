@@ -1175,6 +1175,43 @@ def render_backtest_page(client: Client) -> None:
             )
             st.dataframe(robustness_frame, use_container_width=True, hide_index=True)
 
+        calibration_league_frame = pd.DataFrame(
+            calibration.get("league_diagnostics") or []
+        )
+        if not calibration_league_frame.empty:
+            for column in ("Mevcut Brier", "Kalibre Brier"):
+                calibration_league_frame[column] = calibration_league_frame[column].map(
+                    lambda value: f"{float(value):.4f}"
+                )
+            for column in (
+                "Brier iyileşmesi",
+                "Doğruluk farkı",
+                "Kalibre ROI",
+                "+3 değer ROI",
+            ):
+                calibration_league_frame[column] = calibration_league_frame[column].map(
+                    lambda value: (
+                        "—"
+                        if value is None or pd.isna(value)
+                        else f"{float(value) * 100:+.1f}%"
+                    )
+                )
+            calibration_league_frame["Durum"] = calibration_league_frame["İyileşti"].map(
+                lambda improved: "✅ İyileşti" if improved else "❌ Geriledi"
+            )
+            calibration_league_frame = calibration_league_frame.drop(
+                columns=["İyileşti"]
+            )
+            st.markdown("#### Dokunulmamış %30 sınavın lig bazında sağlamlığı")
+            st.caption(
+                "Toplu ortalamanın tek bir güçlü lig tarafından yanıltılmaması için her lig ayrıca değerlendirilir."
+            )
+            st.dataframe(
+                calibration_league_frame,
+                use_container_width=True,
+                hide_index=True,
+            )
+
         boundary_weights = calibration.get("boundary_weights") or []
         if boundary_weights:
             st.warning(
