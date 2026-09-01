@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from functools import lru_cache
 import json
 import math
 import re
@@ -717,15 +718,21 @@ def _reference_date(match: dict[str, Any], rows: list[dict[str, Any]]) -> pd.Tim
     return pd.Timestamp(valid_dates.max()) if len(valid_dates) else pd.Timestamp.now()
 
 
+@lru_cache(maxsize=8192)
+def _cached_match_date(value: str) -> pd.Timestamp | None:
+    parsed = pd.to_datetime(value, errors="coerce")
+    return None if pd.isna(parsed) else pd.Timestamp(parsed)
+
+
 def _row_weight(
     row: dict[str, Any],
     reference: pd.Timestamp,
     half_life_days: float,
 ) -> float:
-    match_date = pd.to_datetime(row.get("match_date"), errors="coerce")
-    if pd.isna(match_date):
+    match_date = _cached_match_date(str(row.get("match_date") or ""))
+    if match_date is None:
         return 0.25
-    age_days = max(0, (reference - pd.Timestamp(match_date)).days)
+    age_days = max(0, (reference - match_date).days)
     return 0.5 ** (age_days / half_life_days)
 
 
