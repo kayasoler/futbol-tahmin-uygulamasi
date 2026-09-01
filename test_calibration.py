@@ -35,6 +35,17 @@ class CalibrationRobustnessTests(unittest.TestCase):
         self.assertEqual(plus_three["Sanal bahis"], 1)
         self.assertEqual(plus_three["Doğru"], 1)
 
+    def test_value_selection_can_choose_away_result(self):
+        probabilities = np.array([[0.55, 0.25, 0.20]])
+        odds = np.array([[1.70, 3.50, 8.00]])
+        actual = np.array([2])
+
+        rows = _value_rows("Test", probabilities, actual, odds)
+        plus_five = next(row for row in rows if row["Değer eşiği"] == "+5 puan")
+
+        self.assertEqual(plus_five["Sanal bahis"], 1)
+        self.assertEqual(plus_five["Doğru"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
