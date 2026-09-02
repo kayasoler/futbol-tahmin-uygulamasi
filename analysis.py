@@ -472,6 +472,7 @@ Kurallar:
 
     return {
         "text": checked_text,
+        "structured": structured,
         "sources": sources,
         "model": model_used,
         "search_warnings": search_errors,
@@ -701,6 +702,72 @@ def market_odds_context(match: dict[str, Any]) -> dict[str, Any]:
             ),
         }
     return context
+
+
+def decision_summary(
+    report: dict[str, Any],
+    gemini_result: dict[str, Any] | None,
+    movement_rows: list[dict[str, Any]],
+) -> dict[str, str]:
+    """Create a compact model–Gemini–market agreement summary for mobile."""
+    predictions = report.get("predictions") or {}
+    model_ms = str(predictions.get("ms") or "—").replace("MS", "").strip().upper()
+    model_confidence = str(predictions.get("confidence") or "Düşük")
+
+    structured = (gemini_result or {}).get("structured") or {}
+    gemini_predictions = structured.get("predictions") if isinstance(structured, dict) else {}
+    if not isinstance(gemini_predictions, dict):
+        gemini_predictions = {}
+    gemini_ms = str(gemini_predictions.get("ms") or "").strip().upper()
+    if gemini_ms not in {"1", "X", "2"}:
+        text = str((gemini_result or {}).get("text") or "")
+        match = re.search(r"\*\*MS:\*\*\s*(1|X|2)\b", text, flags=re.IGNORECASE)
+        gemini_ms = match.group(1).upper() if match else "—"
+
+    ms_movements = [row for row in movement_rows if str(row.get("Sonuç")) in {"1", "X", "2"}]
+    strongest = max(ms_movements, key=lambda row: float(row.get("Hareket") or 0), default=None)
+    market_ms = str(strongest.get("Sonuç")) if strongest and float(strongest.get("Hareket") or 0) > 0 else "—"
+    market_gap = float(strongest.get("Hareket") or 0) if strongest else 0.0
+    if market_gap >= 0.03:
+        market_strength = "Güçlü"
+    elif market_gap >= 0.015:
+        market_strength = "Orta"
+    elif market_gap > 0:
+        market_strength = "Zayıf"
+    else:
+        market_strength = "Veri yok"
+
+    if gemini_ms == "—":
+        agreement = "Gemini bekleniyor"
+    elif gemini_ms != model_ms:
+        agreement = "Çelişkili"
+    elif market_strength in {"Veri yok", "Zayıf"} or market_ms == model_ms:
+        agreement = "Uyumlu"
+    else:
+        agreement = "Kısmen uyumlu"
+
+    model_total = str((predictions.get("totals") or {}).get("2.5", {}).get("prediction") or "—")
+    gemini_total = "—"
+    totals = gemini_predictions.get("totals") if isinstance(gemini_predictions, dict) else {}
+    if isinstance(totals, dict) and isinstance(totals.get("2.5"), dict):
+        gemini_total = str(totals["2.5"].get("choice") or "—").title()
+    if gemini_total == "—":
+        text = str((gemini_result or {}).get("text") or "")
+        total_match = re.search(r"\*\*2\.5:\*\*\s*(Alt|Üst)", text, flags=re.IGNORECASE)
+        gemini_total = total_match.group(1).title() if total_match else "—"
+    common_total = model_total if model_total == gemini_total and model_total != "—" else "—"
+    shared_pick = f"MS {model_ms}" + (f" · 2.5 {common_total}" if common_total != "—" else "")
+
+    return {
+        "Uyum": agreement,
+        "Ortak seçim": shared_pick,
+        "Model": f"MS {model_ms} · {model_confidence}",
+        "Gemini": f"MS {gemini_ms}" if gemini_ms != "—" else "Henüz oluşturulmadı",
+        "Piyasa": (
+            f"{market_ms} yönü · {market_strength} ({market_gap * 100:+.1f} puan)"
+            if market_ms != "—" else "Hareket verisi yok"
+        ),
+    }
 
 
 def _result_label(row: dict[str, Any]) -> str:
