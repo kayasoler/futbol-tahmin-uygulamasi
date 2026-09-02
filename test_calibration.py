@@ -4,6 +4,7 @@ import numpy as np
 
 from analysis import (
     _canonical_source_url,
+    decision_summary,
     market_odds_context,
     normalized_market_probabilities,
     odds_similarity_label,
@@ -44,6 +45,14 @@ class CalibrationRobustnessTests(unittest.TestCase):
 
     def test_empty_opening_odds_create_no_context(self):
         self.assertEqual(market_odds_context({"b365_home": 1.70}), {})
+
+    def test_decision_summary_detects_three_way_agreement(self):
+        report = {"predictions": {"ms": "MS 1", "confidence": "Orta", "totals": {"2.5": {"prediction": "Alt"}}}}
+        gemini = {"structured": {"predictions": {"ms": "1", "totals": {"2.5": {"choice": "Alt"}}}}}
+        movement = [{"Sonuç": "1", "Hareket": 0.018}, {"Sonuç": "X", "Hareket": -0.008}]
+        summary = decision_summary(report, gemini, movement)
+        self.assertEqual(summary["Uyum"], "Uyumlu")
+        self.assertIn("2.5 Alt", summary["Ortak seçim"])
     def test_odds_similarity_uses_probability_points(self):
         probabilities = normalized_market_probabilities((1.70, 3.80, 5.20))
         self.assertAlmostEqual(sum(probabilities), 1.0)
