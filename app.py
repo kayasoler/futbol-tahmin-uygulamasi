@@ -10,6 +10,7 @@ from supabase import Client, create_client
 
 from analysis import (
     build_report,
+    decision_summary,
     fetch_h2h_rows,
     fetch_league_rows,
     fetch_same_odds_rows,
@@ -649,16 +650,6 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
         "Gemini bu kaynakları ve tüm istatistikleri birleştirerek kendi tahminini üretir."
     )
 
-    st.markdown("#### 1. Geçmiş rekabet · Son 10 maç")
-    if h2h_rows:
-        outcome_summary, goal_summary = h2h_summary_tables(h2h_rows, home, away)
-        st.dataframe(outcome_summary, use_container_width=True, hide_index=True)
-        st.dataframe(goal_summary, use_container_width=True, hide_index=True)
-        st.dataframe(rows_to_table(h2h_rows), use_container_width=True, hide_index=True)
-    else:
-        st.info("Bu iki takım arasında veritabanında geçmiş karşılaşma bulunamadı.")
-
-    st.markdown("#### 2. Açılış–analiz anı oran hareketi")
     movement_rows = odds_movement(
         tuple(match.get(column) for column in ("opening_b365_home", "opening_b365_draw", "opening_b365_away")),
         tuple(match.get(column) for column in ("b365_home", "b365_draw", "b365_away")),
@@ -667,113 +658,96 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
         match.get("opening_b365_over_25"), match.get("opening_b365_under_25"),
         match.get("b365_over_25"), match.get("b365_under_25"),
     ))
-    if movement_rows:
-        movement_frame = pd.DataFrame(movement_rows)
-        movement_frame = movement_frame.rename(columns={"Güncel olasılık": "Analiz anı olasılığı"})
-        for column in ("Açılış olasılığı", "Analiz anı olasılığı", "Hareket"):
-            movement_frame[column] = movement_frame[column].map(lambda value: f"{float(value) * 100:+.1f}%")
-        st.dataframe(movement_frame, use_container_width=True, hide_index=True)
-    else:
-        st.caption("Açılış oranları boşsa bu bölüm hesaplanmaz; ana analiz mevcut referans oranıyla devam eder.")
-
-    st.markdown("#### 3. Benzer Bet365 piyasa analizi")
-    st.caption(
-        "Üçlü oranların marjı temizlenir; ±1,5 / ±3 / ±5 puan olasılık toleranslarıyla benzer geçmiş maçlar gösterilir."
-    )
-    st.markdown("##### A) Aynı ligde aynı oranlar")
-    if same_league_rows:
-        st.dataframe(
-            odds_summary_table(same_league_rows),
-            use_container_width=True,
-            hide_index=True,
-        )
-        st.dataframe(
-            rows_to_table(same_league_rows),
-            use_container_width=True,
-            hide_index=True,
-        )
-    else:
-        st.info("Bu ligde tolerans aralığına giren benzer Bet365 piyasası bulunamadı.")
-
-    st.markdown("##### B) Tüm liglerde aynı oranlar")
-    if same_all_rows:
-        st.dataframe(
-            odds_summary_table(same_all_rows),
-            use_container_width=True,
-            hide_index=True,
-        )
-        st.dataframe(
-            rows_to_table(same_all_rows),
-            use_container_width=True,
-            hide_index=True,
-        )
-    else:
-        st.info("Tüm geçmiş veriler içinde tolerans aralığına giren benzer Bet365 piyasası bulunamadı.")
-
     predictions = report["predictions"]
-    st.markdown("#### 4. Tahmin özeti")
-    p1, p2, p3, p4 = st.columns(4)
-    p1.metric("MS", predictions["ms"])
-    p2.metric("İY/MS", predictions["ht_ms"])
-    p3.metric("Skor", predictions["score"])
-    p4.metric("KG", predictions["btts_prediction"])
-
-    ms_probabilities = predictions.get("ms_probabilities") or {}
-    probability_frame = pd.DataFrame(
-        [
-            {
-                "Sonuç": label,
-                "Birleşik model olasılığı": (
-                    f"{float(ms_probabilities.get(label, 0)) * 100:.1f}%"
-                ),
-            }
-            for label in ("1", "X", "2")
-        ]
+    saved_gemini = dict((analysis_record or {}).get("gemini_result") or {}) or None
+    final_summary = decision_summary(report, saved_gemini, movement_rows)
+    st.markdown("## 🎯 Nihai analiz özeti")
+    summary_left, summary_right = st.columns(2)
+    summary_left.metric("Ortak seçim", final_summary["Ortak seçim"])
+    summary_right.metric("Veri uyumu", final_summary["Uyum"])
+    st.dataframe(
+        pd.DataFrame([
+            {"Kaynak": "İstatistiksel model", "Görüş": final_summary["Model"]},
+            {"Kaynak": "Gemini", "Görüş": final_summary["Gemini"]},
+            {"Kaynak": "Oran hareketi", "Görüş": final_summary["Piyasa"]},
+        ]),
+        use_container_width=True,
+        hide_index=True,
     )
-    st.dataframe(probability_frame, use_container_width=True, hide_index=True)
-    st.caption(
-        f"Beklenen goller: {home} {float(predictions.get('expected_home_goals', 0)):.2f} — "
-        f"{away} {float(predictions.get('expected_away_goals', 0)):.2f} · "
-        f"Model güveni: {predictions.get('confidence', '—')}"
-    )
+    st.caption("Bu kart kaynakların ortak yönünü özetler; kesin sonuç veya kazanç garantisi değildir.")
 
-    totals = predictions["totals"]
-    totals_frame = pd.DataFrame(
-        [
-            {
-                "Baremi": f"{threshold} üst/alt",
-                "Tahmin": data["prediction"],
-                "Tahmin olasılığı": (
-                    f"{data['prediction_probability'] * 100:.1f}%"
-                    if data.get("prediction_probability") is not None
-                    else "—"
-                ),
-            }
-            for threshold, data in totals.items()
-        ]
-    )
-    st.dataframe(totals_frame, use_container_width=True, hide_index=True)
+    with st.expander("1. Geçmiş rekabet · Son 10 maç", expanded=False):
+        if h2h_rows:
+            outcome_summary, goal_summary = h2h_summary_tables(h2h_rows, home, away)
+            st.dataframe(outcome_summary, use_container_width=True, hide_index=True)
+            st.dataframe(goal_summary, use_container_width=True, hide_index=True)
+            st.dataframe(rows_to_table(h2h_rows), use_container_width=True, hide_index=True)
+        else:
+            st.info("Bu iki takım arasında veritabanında geçmiş karşılaşma bulunamadı.")
 
-    components = report.get("components") or []
-    if components:
-        st.markdown("##### Tahmini etkileyen veri kaynakları")
-        component_frame = pd.DataFrame(components)
-        for column in ("Ağırlık", "1", "X", "2"):
-            component_frame[column] = component_frame[column].map(
-                lambda value: f"{float(value) * 100:.1f}%"
+    with st.expander("2. Açılış–analiz anı oran hareketi", expanded=False):
+        if movement_rows:
+            movement_frame = pd.DataFrame(movement_rows).rename(
+                columns={"Güncel olasılık": "Analiz anı olasılığı"}
             )
-        st.dataframe(component_frame, use_container_width=True, hide_index=True)
+            for column in ("Açılış olasılığı", "Analiz anı olasılığı", "Hareket"):
+                movement_frame[column] = movement_frame[column].map(lambda value: f"{float(value) * 100:+.1f}%")
+            st.dataframe(movement_frame, use_container_width=True, hide_index=True)
+        else:
+            st.caption("Açılış oranları boşsa hareket hesaplanmaz; analiz mevcut referans oranıyla devam eder.")
 
-    for warning in report.get("warnings") or []:
-        st.warning(str(warning))
+    with st.expander("3. Benzer Bet365 piyasa analizi", expanded=False):
+        st.caption(
+            "Marjı temizlenmiş olasılık toleransları kullanılır. Özet tüm eşleşmeleri, ayrıntı yalnızca en yakın 20 maçı gösterir."
+        )
+        st.markdown("##### A) Aynı ligde benzer oranlar")
+        if same_league_rows:
+            st.dataframe(odds_summary_table(same_league_rows), use_container_width=True, hide_index=True)
+            st.dataframe(rows_to_table(same_league_rows[:20]), use_container_width=True, hide_index=True)
+        else:
+            st.info("Bu ligde tolerans aralığına giren benzer piyasa bulunamadı.")
+        st.markdown("##### B) Tüm liglerde benzer oranlar")
+        if same_all_rows:
+            st.dataframe(odds_summary_table(same_all_rows), use_container_width=True, hide_index=True)
+            st.dataframe(rows_to_table(same_all_rows[:20]), use_container_width=True, hide_index=True)
+        else:
+            st.info("Tüm geçmiş veriler içinde benzer piyasa bulunamadı.")
 
-    st.markdown("#### İstatistiksel yorum")
-    st.write(report["comment"])
-    st.info(f"İstatistiksel ön kupon: {report['coupon']}")
-    st.caption(
-        f"Lig örneklemi: {predictions['sample_size']} tamamlanmış maç. "
-        "Bu çıktı kesin sonuç veya kazanç garantisi değildir."
-    )
+    with st.expander("4. Ayrıntılı model tahminleri", expanded=False):
+        p1, p2, p3, p4 = st.columns(4)
+        p1.metric("MS", predictions["ms"])
+        p2.metric("İY/MS", predictions["ht_ms"])
+        p3.metric("Skor", predictions["score"])
+        p4.metric("KG", predictions["btts_prediction"])
+        ms_probabilities = predictions.get("ms_probabilities") or {}
+        st.dataframe(pd.DataFrame([
+            {"Sonuç": label, "Birleşik model olasılığı": f"{float(ms_probabilities.get(label, 0)) * 100:.1f}%"}
+            for label in ("1", "X", "2")
+        ]), use_container_width=True, hide_index=True)
+        st.caption(
+            f"Beklenen goller: {home} {float(predictions.get('expected_home_goals', 0)):.2f} — "
+            f"{away} {float(predictions.get('expected_away_goals', 0)):.2f} · Model güveni: {predictions.get('confidence', '—')}"
+        )
+        totals = predictions["totals"]
+        st.dataframe(pd.DataFrame([
+            {"Baremi": f"{threshold} üst/alt", "Tahmin": data["prediction"],
+             "Tahmin olasılığı": f"{data['prediction_probability'] * 100:.1f}%" if data.get("prediction_probability") is not None else "—"}
+            for threshold, data in totals.items()
+        ]), use_container_width=True, hide_index=True)
+        components = report.get("components") or []
+        if components:
+            st.markdown("##### Tahmini etkileyen veri kaynakları")
+            component_frame = pd.DataFrame(components)
+            for column in ("Ağırlık", "1", "X", "2"):
+                component_frame[column] = component_frame[column].map(lambda value: f"{float(value) * 100:.1f}%")
+            st.dataframe(component_frame, use_container_width=True, hide_index=True)
+
+    with st.expander("İstatistiksel yorum ve riskler", expanded=False):
+        for warning in report.get("warnings") or []:
+            st.warning(str(warning))
+        st.write(report["comment"])
+        st.info(f"İstatistiksel ön kupon: {report['coupon']}")
+        st.caption(f"Lig örneklemi: {predictions['sample_size']} tamamlanmış maç.")
 
     st.markdown("#### 5. Güncel takım ve oyuncu bağlamı")
     try:
@@ -927,25 +901,26 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
         )
         st.caption(str(gemini_result["error"]))
     elif gemini_result:
-        st.markdown(str(gemini_result["text"]))
-        if gemini_result.get("storage_warning"):
-            st.caption("Gemini sonucu kalıcı önbelleğe yazılamadı: " + str(gemini_result["storage_warning"]))
-        if gemini_result.get("model"):
-            st.caption(f"Kullanılan Gemini modeli: {gemini_result['model']}")
-        sources = gemini_result.get("sources") or []
-        if sources:
-            st.markdown("##### Tavily tarafından bulunan kaynaklar")
-            for number, source in enumerate(sources, start=1):
-                title = str(source["title"]).replace("[", "(").replace("]", ")")
-                category = str(source.get("category") or "Kaynak")
-                st.markdown(f"{number}. **{category}:** [{title}]({source['url']})")
-        search_warnings = gemini_result.get("search_warnings") or []
-        if search_warnings:
-            st.warning("Bazı haber aramaları tamamlanamadı; mevcut kaynaklarla analiz yapıldı.")
-        st.caption(
-            "Gemini tahminleri kesin sonuç veya kazanç garantisi değildir. "
-            "Kadro ve haberleri maç öncesinde kaynaklardan doğrulayın."
-        )
+        with st.expander("Gemini raporunun tamamını göster", expanded=False):
+            st.markdown(str(gemini_result["text"]))
+            if gemini_result.get("storage_warning"):
+                st.caption("Gemini sonucu kalıcı önbelleğe yazılamadı: " + str(gemini_result["storage_warning"]))
+            if gemini_result.get("model"):
+                st.caption(f"Kullanılan Gemini modeli: {gemini_result['model']}")
+            sources = gemini_result.get("sources") or []
+            if sources:
+                st.markdown("##### Tavily tarafından bulunan kaynaklar")
+                for number, source in enumerate(sources, start=1):
+                    title = str(source["title"]).replace("[", "(").replace("]", ")")
+                    category = str(source.get("category") or "Kaynak")
+                    st.markdown(f"{number}. **{category}:** [{title}]({source['url']})")
+            search_warnings = gemini_result.get("search_warnings") or []
+            if search_warnings:
+                st.warning("Bazı haber aramaları tamamlanamadı; mevcut kaynaklarla analiz yapıldı.")
+            st.caption(
+                "Gemini tahminleri kesin sonuç veya kazanç garantisi değildir. "
+                "Kadro ve haberleri maç öncesinde kaynaklardan doğrulayın."
+            )
 
 
 def render_upcoming_list_tab(client: Client, today) -> None:
