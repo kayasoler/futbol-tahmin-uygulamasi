@@ -674,6 +674,58 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
         use_container_width=True,
         hide_index=True,
     )
+    ms_probabilities = predictions.get("ms_probabilities") or {}
+    ms_primary = str(predictions.get("ms") or "—").replace("MS", "").strip()
+    ht_options = predictions.get("ht_ms_options") or []
+    score_options = predictions.get("score_options") or []
+    btts_probability = float(predictions.get("btts_probability") or 0)
+    btts_pick_probability = btts_probability if predictions.get("btts_prediction") == "KG Var" else 1 - btts_probability
+    total_25 = (predictions.get("totals") or {}).get("2.5") or {}
+    probability_rows = [
+        {
+            "Pazar": "Maç sonucu",
+            "Ana tahmin": f"{ms_primary} · %{float(ms_probabilities.get(ms_primary, 0)) * 100:.1f}",
+            "Diğer ihtimaller": " · ".join(
+                f"{label} %{float(ms_probabilities.get(label, 0)) * 100:.1f}"
+                for label in ("1", "X", "2") if label != ms_primary
+            ),
+        },
+        {
+            "Pazar": "İY/MS",
+            "Ana tahmin": (
+                f"{predictions.get('ht_ms')} · %{float(predictions.get('ht_ms_probability') or 0) * 100:.1f}"
+            ),
+            "Diğer ihtimaller": " · ".join(
+                f"{item['selection']} %{float(item['probability']) * 100:.1f}"
+                for item in ht_options if item.get("selection") != predictions.get("ht_ms")
+            ),
+        },
+        {
+            "Pazar": "Skor",
+            "Ana tahmin": f"{predictions.get('score')} · %{float(predictions.get('score_probability') or 0) * 100:.1f}",
+            "Diğer ihtimaller": " · ".join(
+                f"{item['score']} %{float(item['probability']) * 100:.1f}"
+                for item in score_options if item.get("score") != predictions.get("score")
+            ),
+        },
+        {
+            "Pazar": "Karşılıklı gol",
+            "Ana tahmin": f"{predictions.get('btts_prediction')} · %{btts_pick_probability * 100:.1f}",
+            "Diğer ihtimaller": (
+                f"{'KG Yok' if predictions.get('btts_prediction') == 'KG Var' else 'KG Var'} · %{(1 - btts_pick_probability) * 100:.1f}"
+            ),
+        },
+        {
+            "Pazar": "2.5 Alt/Üst",
+            "Ana tahmin": f"{total_25.get('prediction', '—')} · %{float(total_25.get('prediction_probability') or 0) * 100:.1f}",
+            "Diğer ihtimaller": (
+                f"{'Alt' if total_25.get('prediction') == 'Üst' else 'Üst'} · "
+                f"%{(1 - float(total_25.get('prediction_probability') or 0)) * 100:.1f}"
+            ),
+        },
+    ]
+    st.markdown("#### Olasılıklı tahmin görünümü")
+    st.dataframe(pd.DataFrame(probability_rows), use_container_width=True, hide_index=True)
     st.caption("Bu kart kaynakların ortak yönünü özetler; kesin sonuç veya kazanç garantisi değildir.")
 
     with st.expander("1. Geçmiş rekabet · Son 10 maç", expanded=False):
@@ -719,7 +771,6 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
         p2.metric("İY/MS", predictions["ht_ms"])
         p3.metric("Skor", predictions["score"])
         p4.metric("KG", predictions["btts_prediction"])
-        ms_probabilities = predictions.get("ms_probabilities") or {}
         st.dataframe(pd.DataFrame([
             {"Sonuç": label, "Birleşik model olasılığı": f"{float(ms_probabilities.get(label, 0)) * 100:.1f}%"}
             for label in ("1", "X", "2")
