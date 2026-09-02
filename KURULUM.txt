@@ -42,5 +42,7 @@ Onemli:
 - Analiz edilen maçları, kullanılan oranları, özet model çıktısını ve oluşturulmuş Gemini sonucunu sürümlü saklamak için Supabase SQL Editor içinde supabase_match_analyses.sql dosyasını bir kez çalıştırın.
 - Kayıtlı analiz tekrar açıldığında Highlightly, Tavily ve Gemini yeniden çağrılmaz. Kullanıcı isterse yeni analiz anı oranlarını girip açıkça yeniden analiz ederek yeni bir sürüm oluşturur.
 - Depolamayı korumak için ham geçmiş maçlar ve ham API cevapları analiz kaydında çoğaltılmaz; yalnızca kullanılan küçük özetler saklanır.
+- Mobil analiz ekranında model, Gemini ve oran hareketi önce tek bir nihai özet kartında karşılaştırılır; uzun H2H, benzer oran, model bileşenleri ve Gemini raporu kapalı ayrıntılarda tutulur.
+- Benzer piyasa özetleri tüm uygun örneklemi kullanır, mobil ayrıntı tablosunda yalnızca olasılık profili en yakın 20 maç gösterilir.
 - API fikstüründe yalnızca Supabase içinde tarihsel lig kodu bulunan maçlar gösterilir; desteklenmeyen ligler için ayrıntı alınmaz ve analiz yapılmaz.
 - API takım adları tarihsel CSV takım adlarıyla güvenilir biçimde eşleşmezse analiz güvenlik amacıyla durdurulur.
