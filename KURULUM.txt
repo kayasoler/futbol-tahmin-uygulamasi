@@ -44,5 +44,6 @@ Onemli:
 - Depolamayı korumak için ham geçmiş maçlar ve ham API cevapları analiz kaydında çoğaltılmaz; yalnızca kullanılan küçük özetler saklanır.
 - Mobil analiz ekranında model, Gemini ve oran hareketi önce tek bir nihai özet kartında karşılaştırılır; uzun H2H, benzer oran, model bileşenleri ve Gemini raporu kapalı ayrıntılarda tutulur.
 - Benzer piyasa özetleri tüm uygun örneklemi kullanır, mobil ayrıntı tablosunda yalnızca olasılık profili en yakın 20 maç gösterilir.
+- Nihai mobil özet; MS 1-X-2, İY/MS, ana ve alternatif skorlar, KG ile 2.5 Alt/Üst seçeneklerini karşı ihtimalleri ve yüzdeleriyle birlikte gösterir.
 - API fikstüründe yalnızca Supabase içinde tarihsel lig kodu bulunan maçlar gösterilir; desteklenmeyen ligler için ayrıntı alınmaz ve analiz yapılmaz.
 - API takım adları tarihsel CSV takım adlarıyla güvenilir biçimde eşleşmezse analiz güvenlik amacıyla durdurulur.
