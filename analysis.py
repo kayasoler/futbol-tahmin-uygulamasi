@@ -1384,6 +1384,28 @@ def build_report(
         ]
     ht_result = result_labels[max(range(3), key=lambda index: ht_probabilities[index])]
     ht_ms = f"İY {ht_result} / MS {ms_result}"
+    ht_ms_options = sorted(
+        (
+            {
+                "selection": f"İY {half_label} / MS {full_label}",
+                "probability": half_probability * full_probability,
+            }
+            for half_label, half_probability in zip(result_labels, ht_probabilities)
+            for full_label, full_probability in zip(result_labels, probabilities)
+        ),
+        key=lambda item: item["probability"],
+        reverse=True,
+    )
+
+    primary_score_probability = float(score_grid.get(representative_score, 0.0))
+    score_options = [{"score": score_prediction, "probability": primary_score_probability}]
+    for score, probability in sorted(score_grid.items(), key=lambda item: item[1], reverse=True):
+        label = f"{score[0]}-{score[1]}"
+        if label == score_prediction:
+            continue
+        score_options.append({"score": label, "probability": float(probability)})
+        if len(score_options) >= 5:
+            break
 
     sorted_ms = sorted(probabilities, reverse=True)
     margin = sorted_ms[0] - sorted_ms[1]
@@ -1447,8 +1469,15 @@ def build_report(
             "ms": ms_prediction,
             "ms_probabilities": dict(zip(result_labels, probabilities)),
             "ht_ms": ht_ms,
+            "ht_ms_probability": next(
+                (item["probability"] for item in ht_ms_options if item["selection"] == ht_ms),
+                None,
+            ),
+            "ht_ms_options": ht_ms_options[:5],
             "totals": totals,
             "score": score_prediction,
+            "score_probability": primary_score_probability,
+            "score_options": score_options,
             "btts_probability": btts_probability,
             "btts_prediction": btts_prediction,
             "sample_size": len(valid),
