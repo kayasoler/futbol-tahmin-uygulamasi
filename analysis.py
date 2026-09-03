@@ -196,10 +196,10 @@ def _parse_json_object(text: str) -> dict[str, Any]:
     start = cleaned.find("{")
     end = cleaned.rfind("}")
     if start < 0 or end <= start:
-        raise ValueError("Gemini denetlenebilir JSON biçiminde yanıt vermedi.")
+        raise ValueError("Yorum modeli denetlenebilir JSON biçiminde yanıt vermedi.")
     parsed = json.loads(cleaned[start : end + 1])
     if not isinstance(parsed, dict):
-        raise ValueError("Gemini yanıtının ana yapısı geçersiz.")
+        raise ValueError("Yorum modelinin yanıt yapısı geçersiz.")
     return parsed
 
 
@@ -257,7 +257,7 @@ def _render_checked_gemini_report(
             "## Verilerin ortak yorumu",
             interpretation or "Veriler ortak bir sonuca ulaşmak için yeterli değil.",
             "",
-            "## Gemini tahminleri",
+            "## Yapay zekâ tahminleri",
         ]
     )
     predictions = data.get("predictions")
@@ -343,14 +343,63 @@ def _render_checked_gemini_report(
     return "\n".join(lines)
 
 
-def generate_gemini_grounded_analysis(
-    gemini_api_key: str,
+def _groq_completion(api_key: str, prompt: str) -> tuple[str, str]:
+    """Generate a compact JSON response through Groq's OpenAI-compatible API."""
+    model = "openai/gpt-oss-20b"
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "response_format": {"type": "json_object"},
+        "temperature": 0.2,
+        "max_completion_tokens": 1800,
+    }
+    request = Request(
+        "https://api.groq.com/openai/v1/chat/completions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=45) as response:
+            body = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:600]
+        raise RuntimeError(f"Groq HTTP {exc.code}: {detail}") from exc
+    except (URLError, TimeoutError) as exc:
+        raise RuntimeError(f"Groq bağlantı hatası: {exc}") from exc
+    try:
+        text = body["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise ValueError("Groq beklenen yanıt yapısını döndürmedi.") from exc
+    if not str(text).strip():
+        raise ValueError("Groq boş bir yanıt döndürdü.")
+    return str(text), model
+
+
+def _gemini_completion(api_key: str, prompt: str) -> tuple[str, str]:
+    """Optional fallback for installations that still have a Gemini key."""
+    from google import genai
+
+    model = "gemini-3-flash-preview"
+    client = genai.Client(api_key=api_key)
+    interaction = client.interactions.create(model=model, input=prompt)
+    text = getattr(interaction, "output_text", None)
+    if not text:
+        raise ValueError("Gemini boş bir yanıt döndürdü.")
+    return str(text), model
+
+
+def generate_grounded_analysis(
+    groq_api_key: str,
     tavily_api_key: str,
     match: dict[str, Any],
     report: dict[str, Any],
+    gemini_api_key: str = "",
 ) -> dict[str, Any]:
-    """Search with Tavily, then let Gemini combine news and match statistics."""
-    from google import genai
+    """Search with Tavily, use Groq first, and optionally fall back to Gemini."""
 
     sources, search_errors = _fetch_match_news(tavily_api_key, match)
     if not sources:
@@ -444,28 +493,26 @@ Kurallar:
 - KG Var veya KG Yok tahminini raporda ver fakat kupon selection alanında kullanma.
 - Haber kapsamı yetersizse güveni Yüksek seçme.
 """
-    client = genai.Client(api_key=gemini_api_key)
-    interaction = None
+    raw_text = ""
     model_used = ""
+    provider = ""
     errors: list[str] = []
-    for model_name in ("gemini-3-flash-preview",):
+    providers: list[tuple[str, str, Callable[[str, str], tuple[str, str]]]] = []
+    if groq_api_key:
+        providers.append(("Groq", groq_api_key, _groq_completion))
+    if gemini_api_key:
+        providers.append(("Gemini", gemini_api_key, _gemini_completion))
+    for provider_name, api_key, completion in providers:
         try:
-            interaction = client.interactions.create(
-                model=model_name,
-                input=prompt,
-            )
-            model_used = model_name
+            raw_text, model_used = completion(api_key, prompt)
+            provider = provider_name
             break
         except Exception as exc:
-            errors.append(f"{model_name}: {exc}")
-    if interaction is None:
-        raise RuntimeError(
-            "Gemini 3 Flash yorum oluşturamadı. "
-            + " | ".join(errors)
-        )
-    raw_text = getattr(interaction, "output_text", None)
+            errors.append(f"{provider_name}: {exc}")
     if not raw_text:
-        raise ValueError("Gemini boş bir yanıt döndürdü.")
+        raise RuntimeError(
+            "Yorum modeli çalıştırılamadı. " + " | ".join(errors)
+        )
 
     structured = _parse_json_object(str(raw_text))
     checked_text = _render_checked_gemini_report(structured, sources)
@@ -475,8 +522,19 @@ Kurallar:
         "structured": structured,
         "sources": sources,
         "model": model_used,
+        "provider": provider,
         "search_warnings": search_errors,
     }
+
+
+def generate_gemini_grounded_analysis(
+    gemini_api_key: str,
+    tavily_api_key: str,
+    match: dict[str, Any],
+    report: dict[str, Any],
+) -> dict[str, Any]:
+    """Backward-compatible Gemini-only entry point."""
+    return generate_grounded_analysis("", tavily_api_key, match, report, gemini_api_key)
 
 
 def _key(value: Any) -> str:
