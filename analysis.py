@@ -676,6 +676,65 @@ def odds_similarity_label(max_probability_gap: float) -> str | None:
     return None
 
 
+def filter_exact_odds_rows(
+    rows: list[dict[str, Any]], match: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Return exact two-decimal 1-X-2 matches for display-only diagnostics."""
+    columns = ("b365_home", "b365_draw", "b365_away")
+    target = tuple(_number(match.get(column)) for column in columns)
+    if any(value is None for value in target):
+        return []
+    rounded_target = tuple(round(float(value), 2) for value in target)
+    exact: list[dict[str, Any]] = []
+    for row in rows:
+        candidate = tuple(_number(row.get(column)) for column in columns)
+        if any(value is None for value in candidate):
+            continue
+        if tuple(round(float(value), 2) for value in candidate) == rounded_target:
+            exact.append(dict(row))
+    return exact
+
+
+def exact_odds_diagnostic(
+    rows: list[dict[str, Any]], model_ms: str
+) -> dict[str, Any]:
+    """Summarize exact odds without feeding them back into the prediction model."""
+    count = len(rows)
+    if count >= 100:
+        confidence = "Güçlü"
+    elif count >= 30:
+        confidence = "Orta"
+    elif count >= 15:
+        confidence = "Düşük"
+    elif count >= 5:
+        confidence = "Çok düşük"
+    else:
+        confidence = "Yetersiz"
+    counts = {"1": 0, "X": 0, "2": 0}
+    for row in rows:
+        result = str(row.get("full_time_result") or "").strip().upper()
+        mapped = {"H": "1", "D": "X", "A": "2", "1": "1", "X": "X", "2": "2"}.get(result)
+        if mapped:
+            counts[mapped] += 1
+    maximum = max(counts.values(), default=0)
+    leaders = [label for label, value in counts.items() if value == maximum and value > 0]
+    leader = leaders[0] if len(leaders) == 1 else "Dengeli"
+    normalized_model = str(model_ms or "").replace("MS", "").strip().upper()
+    if count < 5 or leader == "Dengeli":
+        relation = "Karar için yetersiz"
+    elif leader == normalized_model:
+        relation = "Ana modele ek destek"
+    else:
+        relation = "Ana modelle çelişkili"
+    return {
+        "count": count,
+        "confidence": confidence,
+        "leader": leader if count else "—",
+        "relation": relation,
+        "counts": counts,
+    }
+
+
 def odds_movement(
     opening: tuple[float | None, float | None, float | None],
     current: tuple[float | None, float | None, float | None],
