@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import hmac
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -46,6 +46,7 @@ from highlightly import (
     selected_standings,
 )
 from league_mapping import division_for_api_league, match_team_name
+from results_api import fetch_match_result
 from data_import import (
     FIXTURE_REQUIRED_COLUMNS,
     REQUIRED_COLUMNS,
@@ -1200,6 +1201,13 @@ def get_highlightly_lineups(api_key: str, match_id: int) -> object:
     return fetch_lineups(api_key, match_id)
 
 
+@st.cache_data(ttl=21600, show_spinner=False)
+def get_thesportsdb_result(
+    api_key: str, match_date: str, home_team: str, away_team: str
+) -> dict[str, object] | None:
+    return fetch_match_result(api_key, match_date, home_team, away_team)
+
+
 def render_football_data_fixtures_page(client: Client) -> None:
     st.caption("Aşama 23 · Football-Data güncel fikstürü ve Highlightly canlı bağlamı")
     st.subheader("🌍 Güncel Fikstür")
@@ -1535,6 +1543,77 @@ create index if not exists match_results_date_idx
 alter table public.match_results enable row level security;""",
                 language="sql",
             )
+
+    now_istanbul = datetime.now(ZoneInfo("Europe/Istanbul"))
+    result_candidates: list[dict[str, object]] = []
+    for analysis in latest:
+        if str(analysis.get("match_key") or "") in results:
+            continue
+        try:
+            candidate_date = datetime.fromisoformat(str(analysis.get("match_date"))).date()
+            candidate_time = time.fromisoformat(
+                str(analysis.get("kickoff_time") or "23:59:59")[:8]
+            )
+            expected_finish = datetime.combine(
+                candidate_date, candidate_time, tzinfo=ZoneInfo("Europe/Istanbul")
+            ) + timedelta(hours=2, minutes=30)
+        except ValueError:
+            continue
+        if expected_finish <= now_istanbul:
+            result_candidates.append(analysis)
+
+    if st.session_state.pop("automatic_result_sync_message", None):
+        sync_message = st.session_state["automatic_result_sync_last"]
+        st.success(
+            f"TheSportsDB kontrolü tamamlandı: {sync_message['checked']} maç kontrol edildi, "
+            f"{sync_message['saved']} sonuç kaydedildi."
+        )
+        if sync_message["errors"]:
+            st.caption(f"{sync_message['errors']} sorgu geçici hata nedeniyle tamamlanamadı.")
+    if result_candidates and not result_error:
+        st.caption(
+            f"Sonucu bekleyen ve tahmini bitiş saati geçen maç: {len(result_candidates)}"
+        )
+        if st.button(
+            "🔄 Eksik sonuçları API'den otomatik getir",
+            type="primary",
+            use_container_width=True,
+        ):
+            try:
+                thesportsdb_key = str(st.secrets["THESPORTSDB_API_KEY"]).strip()
+            except (KeyError, FileNotFoundError):
+                thesportsdb_key = "123"
+            checked = saved = errors = 0
+            with st.spinner("TheSportsDB üzerinden tamamlanan maçlar kontrol ediliyor..."):
+                for analysis in result_candidates[:20]:
+                    checked += 1
+                    try:
+                        api_result = get_thesportsdb_result(
+                            thesportsdb_key,
+                            str(analysis.get("match_date") or ""),
+                            str(analysis.get("home_team") or ""),
+                            str(analysis.get("away_team") or ""),
+                        )
+                        if not api_result:
+                            continue
+                        save_error = save_match_result(
+                            client,
+                            analysis,
+                            full_time_home=int(api_result["full_time_home"]),
+                            full_time_away=int(api_result["full_time_away"]),
+                            source="thesportsdb",
+                        )
+                        if save_error:
+                            errors += 1
+                        else:
+                            saved += 1
+                    except Exception:
+                        errors += 1
+            st.session_state["automatic_result_sync_last"] = {
+                "checked": checked, "saved": saved, "errors": errors,
+            }
+            st.session_state["automatic_result_sync_message"] = True
+            st.rerun()
 
     evaluations: list[dict[str, object]] = []
     for analysis in latest:
