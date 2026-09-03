@@ -20,5 +20,24 @@ create index if not exists match_analyses_latest_idx
 
 alter table public.match_analyses enable row level security;
 
+create table if not exists public.match_results (
+    match_key text primary key,
+    division text not null,
+    match_date date not null,
+    home_team text not null,
+    away_team text not null,
+    full_time_home smallint not null check (full_time_home >= 0),
+    full_time_away smallint not null check (full_time_away >= 0),
+    half_time_home smallint check (half_time_home >= 0),
+    half_time_away smallint check (half_time_away >= 0),
+    source text not null default 'manual',
+    updated_at timestamptz not null default now()
+);
+
+create index if not exists match_results_date_idx
+    on public.match_results (match_date desc);
+
+alter table public.match_results enable row level security;
+
 -- Uygulama yalnızca Streamlit Secrets içindeki service role anahtarıyla erişir.
 -- Bu nedenle anon/authenticated kullanıcı politikası açılmaz.
