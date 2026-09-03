@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime, time
 import hashlib
 import json
+import re
 from typing import Any
 
 
@@ -118,3 +119,113 @@ def update_analysis_artifacts(
         return None
     except Exception as exc:
         return str(exc)
+
+
+def load_analysis_history(client, limit: int = 300) -> tuple[list[dict[str, Any]], str | None]:
+    """Load recent compact analysis versions without historical match payloads."""
+    try:
+        response = (
+            client.table("match_analyses")
+            .select(
+                "id,match_key,version,division,match_date,kickoff_time,home_team,"
+                "away_team,analyzed_at,match_snapshot,report_snapshot,gemini_result"
+            )
+            .order("analyzed_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return [dict(row) for row in (response.data or [])], None
+    except Exception as exc:
+        return [], str(exc)
+
+
+def load_match_results(client, limit: int = 500) -> tuple[dict[str, dict[str, Any]], str | None]:
+    try:
+        response = client.table("match_results").select("*").limit(limit).execute()
+        rows = [dict(row) for row in (response.data or [])]
+        return {str(row["match_key"]): row for row in rows}, None
+    except Exception as exc:
+        return {}, str(exc)
+
+
+def save_match_result(
+    client,
+    analysis: dict[str, Any],
+    *,
+    full_time_home: int,
+    full_time_away: int,
+    half_time_home: int | None = None,
+    half_time_away: int | None = None,
+) -> str | None:
+    payload = {
+        "match_key": str(analysis.get("match_key") or ""),
+        "division": str(analysis.get("division") or ""),
+        "match_date": str(analysis.get("match_date") or ""),
+        "home_team": str(analysis.get("home_team") or ""),
+        "away_team": str(analysis.get("away_team") or ""),
+        "full_time_home": int(full_time_home),
+        "full_time_away": int(full_time_away),
+        "half_time_home": None if half_time_home is None else int(half_time_home),
+        "half_time_away": None if half_time_away is None else int(half_time_away),
+        "source": "manual",
+    }
+    try:
+        client.table("match_results").upsert(payload, on_conflict="match_key").execute()
+        return None
+    except Exception as exc:
+        return str(exc)
+
+
+def _result_code(home_goals: int, away_goals: int) -> str:
+    return "1" if home_goals > away_goals else "2" if away_goals > home_goals else "X"
+
+
+def evaluate_analysis(
+    analysis: dict[str, Any], result: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Compare one stored prediction snapshot with the recorded final score."""
+    predictions = dict((analysis.get("report_snapshot") or {}).get("predictions") or {})
+    ft_home = int(result["full_time_home"])
+    ft_away = int(result["full_time_away"])
+    ft_code = _result_code(ft_home, ft_away)
+    predicted_ms_match = re.search(r"(?:MS\s*)?(1|X|2)\b", str(predictions.get("ms") or ""), re.I)
+    predicted_ms = predicted_ms_match.group(1).upper() if predicted_ms_match else "—"
+    rows = [{
+        "Pazar": "Maç sonucu", "Tahmin": predicted_ms,
+        "Gerçek": ft_code, "Doğru": predicted_ms == ft_code,
+    }]
+
+    predicted_score = str(predictions.get("score") or "—").strip()
+    actual_score = f"{ft_home}-{ft_away}"
+    rows.append({
+        "Pazar": "Kesin skor", "Tahmin": predicted_score,
+        "Gerçek": actual_score, "Doğru": predicted_score == actual_score,
+    })
+
+    actual_btts = "KG Var" if ft_home > 0 and ft_away > 0 else "KG Yok"
+    predicted_btts = str(predictions.get("btts_prediction") or "—").strip()
+    rows.append({
+        "Pazar": "Karşılıklı gol", "Tahmin": predicted_btts,
+        "Gerçek": actual_btts, "Doğru": predicted_btts.casefold() == actual_btts.casefold(),
+    })
+
+    total_25 = (predictions.get("totals") or {}).get("2.5") or {}
+    predicted_total = str(total_25.get("prediction") or "—").strip().title()
+    actual_total = "Üst" if ft_home + ft_away > 2.5 else "Alt"
+    rows.append({
+        "Pazar": "2.5 Alt/Üst", "Tahmin": predicted_total,
+        "Gerçek": actual_total, "Doğru": predicted_total == actual_total,
+    })
+
+    ht_home = result.get("half_time_home")
+    ht_away = result.get("half_time_away")
+    if ht_home is not None and ht_away is not None:
+        ht_code = _result_code(int(ht_home), int(ht_away))
+        actual_ht_ms = f"İY {ht_code} / MS {ft_code}".upper()
+        predicted_ht_ms = re.sub(r"MS\s*", "MS ", str(predictions.get("ht_ms") or "—"), flags=re.I)
+        predicted_ht_ms = re.sub(r"\s+", " ", predicted_ht_ms).strip().upper()
+        rows.append({
+            "Pazar": "İY/MS", "Tahmin": predicted_ht_ms,
+            "Gerçek": actual_ht_ms, "Doğru": predicted_ht_ms == actual_ht_ms,
+        })
+    return rows
