@@ -1157,6 +1157,18 @@ def render_football_data_fixtures_page(client: Client) -> None:
     st.caption("Aşama 23 · Football-Data güncel fikstürü ve Highlightly canlı bağlamı")
     st.subheader("🌍 Güncel Fikstür")
     st.caption("Fikstür ve oranlar Football-Data.co.uk kaynağından alınır; API kotası harcanmaz.")
+    if st.button(
+        "🔄 Fikstürü yenile",
+        key="refresh_football_data_fixtures",
+        type="primary",
+        use_container_width=True,
+    ):
+        get_football_data_fixtures.clear()
+        st.session_state.pop("football_data_fixture_selector", None)
+        st.session_state["football_data_fixture_refreshed"] = True
+        st.rerun()
+    if st.session_state.pop("football_data_fixture_refreshed", False):
+        st.success("Fikstür Football-Data sitesinden yeniden alındı.")
     try:
         fixtures = get_football_data_fixtures()
     except Exception as exc:
