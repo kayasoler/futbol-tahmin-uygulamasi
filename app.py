@@ -515,17 +515,38 @@ def render_manual_fixture_tab(client: Client, today) -> None:
         home_team = team_left.selectbox("Ev sahibi", teams, index=0)
         away_team = team_right.selectbox("Deplasman", teams, index=1)
 
+        st.markdown("##### Analiz anında gördüğünüz oranlar")
         odd_1, odd_x, odd_2 = st.columns(3)
-        b365_home = odd_1.number_input("Bet365 MS 1", min_value=1.01, value=2.00, step=0.01)
-        b365_draw = odd_x.number_input("Bet365 X", min_value=1.01, value=3.00, step=0.01)
-        b365_away = odd_2.number_input("Bet365 MS 2", min_value=1.01, value=3.00, step=0.01)
+        b365_home = odd_1.number_input("Analiz anı MS 1", min_value=1.01, value=2.00, step=0.01)
+        b365_draw = odd_x.number_input("Analiz anı X", min_value=1.01, value=3.00, step=0.01)
+        b365_away = odd_2.number_input("Analiz anı MS 2", min_value=1.01, value=3.00, step=0.01)
 
         over_col, under_col = st.columns(2)
         b365_over = over_col.number_input(
-            "Bet365 2.5 Üst — yoksa 0", min_value=0.0, value=0.0, step=0.01
+            "Analiz anı 2.5 Üst — yoksa 0", min_value=0.0, value=0.0, step=0.01
         )
         b365_under = under_col.number_input(
-            "Bet365 2.5 Alt — yoksa 0", min_value=0.0, value=0.0, step=0.01
+            "Analiz anı 2.5 Alt — yoksa 0", min_value=0.0, value=0.0, step=0.01
+        )
+
+        st.markdown("##### İsteğe bağlı Bet365 açılış oranları")
+        st.caption("Bulamadığınız grubu tamamen boş bırakabilirsiniz.")
+        opening_1, opening_x, opening_2 = st.columns(3)
+        opening_home = opening_1.number_input(
+            "Açılış MS 1", min_value=0.0, value=0.0, step=0.01
+        )
+        opening_draw = opening_x.number_input(
+            "Açılış X", min_value=0.0, value=0.0, step=0.01
+        )
+        opening_away = opening_2.number_input(
+            "Açılış MS 2", min_value=0.0, value=0.0, step=0.01
+        )
+        opening_over_col, opening_under_col = st.columns(2)
+        opening_over = opening_over_col.number_input(
+            "Açılış 2.5 Üst", min_value=0.0, value=0.0, step=0.01
+        )
+        opening_under = opening_under_col.number_input(
+            "Açılış 2.5 Alt", min_value=0.0, value=0.0, step=0.01
         )
 
         submitted = st.form_submit_button(
@@ -537,6 +558,14 @@ def render_manual_fixture_tab(client: Client, today) -> None:
 
     if home_team == away_team:
         st.error("Ev sahibi ve deplasman takımı aynı olamaz.")
+        return
+    opening_ms = (opening_home, opening_draw, opening_away)
+    if any(value > 0 for value in opening_ms) and not all(value > 1 for value in opening_ms):
+        st.error("Açılış MS oranlarının üçünü birlikte girin veya üçünü de boş bırakın.")
+        return
+    opening_totals = (opening_over, opening_under)
+    if any(value > 0 for value in opening_totals) and not all(value > 1 for value in opening_totals):
+        st.error("Açılış 2.5 Üst ve Alt oranlarını birlikte girin veya ikisini de boş bırakın.")
         return
 
     record = {
@@ -551,7 +580,15 @@ def render_manual_fixture_tab(client: Client, today) -> None:
         "b365_over_25": float(b365_over) if b365_over > 0 else None,
         "b365_under_25": float(b365_under) if b365_under > 0 else None,
         "entry_method": "manual",
-        "raw_data": {},
+        "raw_data": {
+            "opening_odds": {
+                "opening_b365_home": float(opening_home) if opening_home > 1 else None,
+                "opening_b365_draw": float(opening_draw) if opening_draw > 1 else None,
+                "opening_b365_away": float(opening_away) if opening_away > 1 else None,
+                "opening_b365_over_25": float(opening_over) if opening_over > 1 else None,
+                "opening_b365_under_25": float(opening_under) if opening_under > 1 else None,
+            }
+        },
     }
 
     try:
@@ -991,7 +1028,7 @@ def render_upcoming_list_tab(client: Client, today) -> None:
             .select(
                 "id,division,match_date,kickoff_time,home_team,away_team,"
                 "b365_home,b365_draw,b365_away,b365_over_25,b365_under_25,"
-                "entry_method,match_status"
+                "entry_method,match_status,raw_data"
             )
             .gte("match_date", today.isoformat())
             .order("match_date")
@@ -1026,7 +1063,7 @@ def render_upcoming_list_tab(client: Client, today) -> None:
             "match_status": "Durum",
         }
     )
-    frame = frame.drop(columns=["Kayıt ID"], errors="ignore")
+    frame = frame.drop(columns=["Kayıt ID", "raw_data"], errors="ignore")
     st.caption("Analiz başlatmak için aşağıdaki tabloda bir maç satırına tıklayın.")
     selection_event = st.dataframe(
         frame,
@@ -1040,7 +1077,13 @@ def render_upcoming_list_tab(client: Client, today) -> None:
     if selected_rows:
         selected_index = int(selected_rows[0])
         if 0 <= selected_index < len(rows):
-            render_match_analysis(client, rows[selected_index])
+            selected_match = dict(rows[selected_index])
+            raw_data = selected_match.get("raw_data") or {}
+            opening_odds = raw_data.get("opening_odds") if isinstance(raw_data, dict) else {}
+            if isinstance(opening_odds, dict):
+                selected_match.update(opening_odds)
+            selected_match["analysis_odds_source"] = "Manuel analiz anı oranı"
+            render_match_analysis(client, selected_match)
 
 
 def render_upcoming_page(client: Client) -> None:
