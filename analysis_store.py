@@ -156,6 +156,7 @@ def save_match_result(
     full_time_away: int,
     half_time_home: int | None = None,
     half_time_away: int | None = None,
+    source: str = "manual",
 ) -> str | None:
     payload = {
         "match_key": str(analysis.get("match_key") or ""),
@@ -167,7 +168,7 @@ def save_match_result(
         "full_time_away": int(full_time_away),
         "half_time_home": None if half_time_home is None else int(half_time_home),
         "half_time_away": None if half_time_away is None else int(half_time_away),
-        "source": "manual",
+        "source": str(source or "manual"),
     }
     try:
         client.table("match_results").upsert(payload, on_conflict="match_key").execute()
