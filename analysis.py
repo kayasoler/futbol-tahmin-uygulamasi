@@ -403,8 +403,10 @@ def generate_grounded_analysis(
 
     sources, search_errors = _fetch_match_news(tavily_api_key, match)
     if not sources:
-        detail = " | ".join(search_errors) if search_errors else "Sonuç bulunamadı."
-        raise RuntimeError(f"Tavily güncel haber bulamadı. {detail}")
+        search_errors.append(
+            "Tavily seçili maç için doğrulanabilir güncel haber bulamadı; "
+            "yorum yalnızca mevcut istatistik ve oranlarla üretildi."
+        )
 
     predictions = report["predictions"]
     prompt = f"""
