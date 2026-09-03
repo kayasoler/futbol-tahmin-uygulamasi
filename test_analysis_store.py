@@ -1,6 +1,6 @@
 import unittest
 
-from analysis_store import analysis_match_key, compact_report, match_snapshot
+from analysis_store import analysis_match_key, compact_report, evaluate_analysis, match_snapshot
 
 
 class AnalysisStoreTests(unittest.TestCase):
@@ -19,6 +19,21 @@ class AnalysisStoreTests(unittest.TestCase):
         snapshot = match_snapshot({"b365_home": 1.70, "csv_b365_home": 1.82})
         self.assertEqual(snapshot["b365_home"], 1.70)
         self.assertEqual(snapshot["csv_b365_home"], 1.82)
+
+    def test_evaluates_stored_prediction_against_score(self):
+        analysis = {"report_snapshot": {"predictions": {
+            "ms": "MS 1", "score": "2-1", "btts_prediction": "KG Var",
+            "ht_ms": "İY X / MS 1", "totals": {"2.5": {"prediction": "Üst"}},
+        }}}
+        result = {
+            "full_time_home": 2, "full_time_away": 1,
+            "half_time_home": 0, "half_time_away": 0,
+        }
+
+        rows = evaluate_analysis(analysis, result)
+
+        self.assertEqual(len(rows), 5)
+        self.assertTrue(all(row["Doğru"] for row in rows))
 
 
 if __name__ == "__main__":
