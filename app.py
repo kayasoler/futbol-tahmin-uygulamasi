@@ -15,7 +15,7 @@ from analysis import (
     fetch_league_rows,
     fetch_same_odds_rows,
     fetch_team_form_rows,
-    generate_gemini_grounded_analysis,
+    generate_grounded_analysis,
     h2h_summary_tables,
     market_odds_context,
     odds_summary_table,
@@ -647,7 +647,7 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
 
     st.info(
         "İstatistiksel model geçmiş verilerle çalışır. Tavily güncel haberleri arar; "
-        "Gemini bu kaynakları ve tüm istatistikleri birleştirerek kendi tahminini üretir."
+        "Groq bu kaynakları ve tüm istatistikleri birleştirerek kendi yorumunu üretir."
     )
 
     movement_rows = odds_movement(
@@ -668,7 +668,7 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
     st.dataframe(
         pd.DataFrame([
             {"Kaynak": "İstatistiksel model", "Görüş": final_summary["Model"]},
-            {"Kaynak": "Gemini", "Görüş": final_summary["Gemini"]},
+            {"Kaynak": "Yapay zekâ yorumu", "Görüş": final_summary["Gemini"]},
             {"Kaynak": "Oran hareketi", "Görüş": final_summary["Piyasa"]},
         ]),
         use_container_width=True,
@@ -885,11 +885,15 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
     elif isinstance(live_context, dict):
         st.info("Highlightly seçilen maçı güvenilir biçimde eşleştiremedi; yanlış takım verisi kullanılmadı.")
 
-    st.markdown("#### 6. Canlı araştırma ve Gemini tahmini")
+    st.markdown("#### 6. Canlı araştırma ve yapay zekâ yorumu")
     st.write(
-        "Tavily yalnızca seçili maç ve takımlar için güncel kaynakları arar. Gemini, "
+        "Tavily yalnızca seçili maç ve takımlar için güncel kaynakları arar. Groq, "
         "bu haberleri veritabanındaki istatistiklerle birleştirerek kendi tahminini üretir."
     )
+    try:
+        groq_api_key = str(st.secrets["GROQ_API_KEY"]).strip()
+    except KeyError:
+        groq_api_key = ""
     try:
         gemini_api_key = str(st.secrets["GEMINI_API_KEY"]).strip()
     except KeyError:
@@ -904,12 +908,12 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
         st.session_state[gemini_state_key] = dict(analysis_record["gemini_result"])
     has_stored_gemini = bool((analysis_record or {}).get("gemini_result"))
     if has_stored_gemini:
-        st.info("Kayıtlı Tavily–Gemini analizi kullanılıyor; yeni kota harcanmadı.")
+        st.info("Kayıtlı canlı araştırma ve yapay zekâ yorumu kullanılıyor; yeni kota harcanmadı.")
 
-    if (not gemini_api_key or not tavily_api_key) and not has_stored_gemini:
+    if ((not groq_api_key and not gemini_api_key) or not tavily_api_key) and not has_stored_gemini:
         missing_keys = []
-        if not gemini_api_key:
-            missing_keys.append("GEMINI_API_KEY")
+        if not groq_api_key and not gemini_api_key:
+            missing_keys.append("GROQ_API_KEY")
         if not tavily_api_key:
             missing_keys.append("TAVILY_API_KEY")
         st.warning(
@@ -917,19 +921,20 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
             + ", ".join(missing_keys)
         )
     elif not has_stored_gemini and st.button(
-                "Güncel haberleri araştır ve Gemini tahmini oluştur",
+                "Güncel haberleri araştır ve yapay zekâ yorumunu oluştur",
                 key=f"tavily_gemini_button_{match.get('id')}",
                 use_container_width=True,
             ):
             with st.spinner(
-                "Tavily güncel kaynakları arıyor; Gemini tüm verileri yorumluyor..."
+                "Tavily güncel kaynakları arıyor; Groq tüm verileri yorumluyor..."
             ):
                 try:
-                    generated_result = generate_gemini_grounded_analysis(
-                            gemini_api_key,
+                    generated_result = generate_grounded_analysis(
+                            groq_api_key,
                             tavily_api_key,
                             match,
                             report,
+                            gemini_api_key,
                         )
                     st.session_state[gemini_state_key] = generated_result
                     artifact_error = update_analysis_artifacts(
@@ -947,17 +952,18 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
     gemini_result = st.session_state.get(gemini_state_key)
     if isinstance(gemini_result, dict) and "error" in gemini_result:
         st.error(
-            "Canlı araştırma tamamlanamadı. Tavily veya Gemini anahtarını ve "
+            "Canlı araştırma tamamlanamadı. Tavily/Groq anahtarını ve "
             "ücretsiz kullanım kotasını kontrol edin."
         )
         st.caption(str(gemini_result["error"]))
     elif gemini_result:
-        with st.expander("Gemini raporunun tamamını göster", expanded=False):
+        with st.expander("Yapay zekâ raporunun tamamını göster", expanded=False):
             st.markdown(str(gemini_result["text"]))
             if gemini_result.get("storage_warning"):
-                st.caption("Gemini sonucu kalıcı önbelleğe yazılamadı: " + str(gemini_result["storage_warning"]))
+                st.caption("Yapay zekâ sonucu kalıcı önbelleğe yazılamadı: " + str(gemini_result["storage_warning"]))
             if gemini_result.get("model"):
-                st.caption(f"Kullanılan Gemini modeli: {gemini_result['model']}")
+                provider = gemini_result.get("provider") or "Gemini"
+                st.caption(f"Kullanılan yorum modeli: {provider} · {gemini_result['model']}")
             sources = gemini_result.get("sources") or []
             if sources:
                 st.markdown("##### Tavily tarafından bulunan kaynaklar")
@@ -969,7 +975,7 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
             if search_warnings:
                 st.warning("Bazı haber aramaları tamamlanamadı; mevcut kaynaklarla analiz yapıldı.")
             st.caption(
-                "Gemini tahminleri kesin sonuç veya kazanç garantisi değildir. "
+                "Yapay zekâ tahminleri kesin sonuç veya kazanç garantisi değildir. "
                 "Kadro ve haberleri maç öncesinde kaynaklardan doğrulayın."
             )
 
