@@ -1161,6 +1161,13 @@ def render_football_data_fixtures_page(client: Client) -> None:
     st.caption("Aşama 23 · Football-Data güncel fikstürü ve Highlightly canlı bağlamı")
     st.subheader("🌍 Güncel Fikstür")
     st.caption("Fikstür ve oranlar Football-Data.co.uk kaynağından alınır; API kotası harcanmaz.")
+    today = datetime.now(ZoneInfo("Europe/Istanbul")).date()
+    if "last_manual_fixture" in st.session_state:
+        st.success(st.session_state.pop("last_manual_fixture"))
+    with st.expander("➕ Manuel maç ekle", expanded=False):
+        render_manual_fixture_tab(client, today)
+    with st.expander("📋 Manuel ve dosyadan eklenen maçları göster", expanded=False):
+        render_upcoming_list_tab(client, today)
     if st.button(
         "🔄 Fikstürü yenile",
         key="refresh_football_data_fixtures",
