@@ -26,8 +26,12 @@ from analysis import (
 from backtest import aggregate_backtests, run_backtest
 from calibration import calibrate_model
 from analysis_store import (
+    evaluate_analysis,
+    load_analysis_history,
     load_latest_analysis,
+    load_match_results,
     save_analysis_version,
+    save_match_result,
     update_analysis_artifacts,
 )
 from api_football import fetch_bet365_odds, fetch_fixtures, normalize_api_keys
@@ -1437,6 +1441,160 @@ def render_world_fixtures_page(client: Client) -> None:
     render_match_analysis(client, analysis_match)
 
 
+def render_analysis_history_page(client: Client) -> None:
+    st.subheader("📚 Analiz Geçmişi ve Sonuçlar")
+    st.caption(
+        "Her maçın son analiz sürümü gösterilir. Gerçek skor bir kez saklanır ve "
+        "tahmin pazarları otomatik değerlendirilir."
+    )
+    analyses, analysis_error = load_analysis_history(client)
+    if analysis_error:
+        st.error("Kayıtlı analizler alınamadı.")
+        st.caption(analysis_error)
+        return
+    if not analyses:
+        st.info("Henüz kaydedilmiş maç analizi bulunmuyor.")
+        return
+
+    latest_by_match: dict[str, dict[str, object]] = {}
+    for row in analyses:
+        key = str(row.get("match_key") or "")
+        if key not in latest_by_match:
+            latest_by_match[key] = row
+    latest = list(latest_by_match.values())
+    results, result_error = load_match_results(client)
+    if result_error:
+        st.warning("Sonuç kayıt tablosu henüz kurulmamış olabilir.")
+        with st.expander("Supabase için sonuç tablosu SQL kodunu göster"):
+            st.code(
+                """create table if not exists public.match_results (
+  match_key text primary key,
+  division text not null,
+  match_date date not null,
+  home_team text not null,
+  away_team text not null,
+  full_time_home smallint not null check (full_time_home >= 0),
+  full_time_away smallint not null check (full_time_away >= 0),
+  half_time_home smallint check (half_time_home >= 0),
+  half_time_away smallint check (half_time_away >= 0),
+  source text not null default 'manual',
+  updated_at timestamptz not null default now()
+);
+create index if not exists match_results_date_idx
+  on public.match_results (match_date desc);
+alter table public.match_results enable row level security;""",
+                language="sql",
+            )
+
+    evaluations: list[dict[str, object]] = []
+    for analysis in latest:
+        result = results.get(str(analysis.get("match_key") or ""))
+        if result:
+            evaluations.extend(evaluate_analysis(analysis, result))
+    ms_rows = [row for row in evaluations if row["Pazar"] == "Maç sonucu"]
+    total_rows = [row for row in evaluations if row["Pazar"] == "2.5 Alt/Üst"]
+    metric_columns = st.columns(4)
+    metric_columns[0].metric("Analiz edilen maç", len(latest))
+    metric_columns[1].metric("Sonucu girilen", len(results))
+    metric_columns[2].metric(
+        "MS başarısı",
+        f"%{sum(bool(row['Doğru']) for row in ms_rows) / len(ms_rows) * 100:.1f}"
+        if ms_rows else "—",
+    )
+    metric_columns[3].metric(
+        "2.5 başarısı",
+        f"%{sum(bool(row['Doğru']) for row in total_rows) / len(total_rows) * 100:.1f}"
+        if total_rows else "—",
+    )
+
+    history_rows: list[dict[str, object]] = []
+    for row in latest:
+        predictions = dict((row.get("report_snapshot") or {}).get("predictions") or {})
+        result = results.get(str(row.get("match_key") or ""))
+        history_rows.append({
+            "Tarih": row.get("match_date"), "Lig": row.get("division"),
+            "Maç": f"{row.get('home_team')} — {row.get('away_team')}",
+            "Sürüm": row.get("version"), "MS": predictions.get("ms") or "—",
+            "Skor": predictions.get("score") or "—",
+            "Gerçek": f"{result['full_time_home']}-{result['full_time_away']}" if result else "Bekleniyor",
+        })
+    st.dataframe(pd.DataFrame(history_rows), use_container_width=True, hide_index=True)
+
+    labels = {
+        str(row["match_key"]): f"{row.get('match_date')} · {row.get('home_team')} — {row.get('away_team')}"
+        for row in latest
+    }
+    selected_key = st.selectbox(
+        "Sonucunu görüntüle veya gir", list(labels), format_func=lambda key: labels[key]
+    )
+    selected = latest_by_match[selected_key]
+    stored_result = results.get(selected_key)
+    match_date = datetime.fromisoformat(str(selected.get("match_date"))).date()
+    kickoff_text = str(selected.get("kickoff_time") or "23:59:59")[:8]
+    try:
+        kickoff_clock = time.fromisoformat(kickoff_text)
+    except ValueError:
+        kickoff_clock = time(23, 59, 59)
+    kickoff = datetime.combine(match_date, kickoff_clock, tzinfo=ZoneInfo("Europe/Istanbul"))
+    match_started = datetime.now(ZoneInfo("Europe/Istanbul")) >= kickoff
+    if not match_started and not stored_result:
+        st.info("Bu maç henüz başlamadığı için gerçek sonuç kaydı kapalıdır.")
+
+    st.markdown("#### Gerçek maç sonucu")
+    with st.form(f"result_form_{selected_key}"):
+        full_columns = st.columns(2)
+        full_home = full_columns[0].number_input(
+            f"MS · {selected.get('home_team')}", min_value=0, max_value=30,
+            value=int((stored_result or {}).get("full_time_home") or 0), step=1,
+        )
+        full_away = full_columns[1].number_input(
+            f"MS · {selected.get('away_team')}", min_value=0, max_value=30,
+            value=int((stored_result or {}).get("full_time_away") or 0), step=1,
+        )
+        has_half_time = st.checkbox(
+            "İlk yarı skoru da mevcut",
+            value=(stored_result or {}).get("half_time_home") is not None,
+        )
+        half_home = half_away = 0
+        if has_half_time:
+            half_columns = st.columns(2)
+            half_home = half_columns[0].number_input(
+                f"İY · {selected.get('home_team')}", min_value=0, max_value=20,
+                value=int((stored_result or {}).get("half_time_home") or 0), step=1,
+            )
+            half_away = half_columns[1].number_input(
+                f"İY · {selected.get('away_team')}", min_value=0, max_value=20,
+                value=int((stored_result or {}).get("half_time_away") or 0), step=1,
+            )
+        submitted = st.form_submit_button(
+            "Sonucu kaydet veya güncelle", use_container_width=True,
+            disabled=bool(result_error) or (not match_started and not stored_result),
+        )
+    if submitted:
+        save_error = save_match_result(
+            client, selected, full_time_home=int(full_home), full_time_away=int(full_away),
+            half_time_home=int(half_home) if has_half_time else None,
+            half_time_away=int(half_away) if has_half_time else None,
+        )
+        if save_error:
+            st.error("Maç sonucu kaydedilemedi.")
+            st.caption(save_error)
+        else:
+            st.session_state["result_saved_message"] = True
+            st.rerun()
+    if st.session_state.pop("result_saved_message", False):
+        st.success("Maç sonucu kaydedildi ve tahminler değerlendirildi.")
+
+    if stored_result:
+        comparison_frame = pd.DataFrame(evaluate_analysis(selected, stored_result))
+        comparison_frame["Durum"] = comparison_frame["Doğru"].map(
+            lambda correct: "✅ Doğru" if correct else "❌ Yanlış"
+        )
+        st.dataframe(
+            comparison_frame.drop(columns=["Doğru"]), use_container_width=True, hide_index=True
+        )
+
+
 def render_backtest_page(client: Client) -> None:
     st.caption("Model doğrulama · Geçmiş maçlarda ileri yürüyen tarafsız test")
     st.subheader("🧪 İstatistiksel model backtesti")
@@ -1874,7 +2032,7 @@ require_login()
 with st.sidebar:
     section = st.radio(
         "Bölüm",
-        ["Geçmiş Veri", "Yaklaşan Maçlar", "Dünya Fikstürü", "Model Testi"],
+        ["Geçmiş Veri", "Yaklaşan Maçlar", "Dünya Fikstürü", "Analiz Geçmişi", "Model Testi"],
         key="app_section",
     )
     st.caption("Maç analizi yapabilir veya modelin geçmiş performansını ölçebilirsiniz.")
@@ -1895,6 +2053,8 @@ try:
         render_upcoming_page(supabase)
     elif section == "Dünya Fikstürü":
         render_football_data_fixtures_page(supabase)
+    elif section == "Analiz Geçmişi":
+        render_analysis_history_page(supabase)
     else:
         render_backtest_page(supabase)
 except Exception as exc:
