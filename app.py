@@ -11,10 +11,12 @@ from supabase import Client, create_client
 from analysis import (
     build_report,
     decision_summary,
+    exact_odds_diagnostic,
     fetch_h2h_rows,
     fetch_league_rows,
     fetch_same_odds_rows,
     fetch_team_form_rows,
+    filter_exact_odds_rows,
     generate_grounded_analysis,
     h2h_summary_tables,
     market_odds_context,
@@ -806,6 +808,34 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
             st.dataframe(rows_to_table(same_all_rows[:20]), use_container_width=True, hide_index=True)
         else:
             st.info("Tüm geçmiş veriler içinde benzer piyasa bulunamadı.")
+
+    exact_league_rows = filter_exact_odds_rows(same_league_rows, match)
+    exact_all_rows = filter_exact_odds_rows(same_all_rows, match)
+    with st.expander("3B. Birebir Bet365 oran doğrulaması · ana modeli etkilemez", expanded=False):
+        st.caption(
+            "Analiz anındaki MS 1/X/2 oranlarının iki ondalıkta tamamen aynı olduğu geçmiş "
+            "maçlar gösterilir. Bu bölüm yalnızca ek fikir verir; tahmin ağırlıklarını değiştirmez."
+        )
+        for title, exact_rows in (
+            ("Aynı ligde birebir oranlar", exact_league_rows),
+            ("Tüm liglerde birebir oranlar", exact_all_rows),
+        ):
+            st.markdown(f"##### {title}")
+            diagnostic = exact_odds_diagnostic(exact_rows, predictions.get("ms") or "")
+            exact_metrics = st.columns(4)
+            exact_metrics[0].metric("Örneklem", diagnostic["count"])
+            exact_metrics[1].metric("Güven", diagnostic["confidence"])
+            exact_metrics[2].metric("En sık MS", diagnostic["leader"])
+            exact_metrics[3].metric("Ana model ilişkisi", diagnostic["relation"])
+            if exact_rows:
+                st.dataframe(
+                    odds_summary_table(exact_rows), use_container_width=True, hide_index=True
+                )
+                st.dataframe(
+                    rows_to_table(exact_rows[:20]), use_container_width=True, hide_index=True
+                )
+            else:
+                st.info("Bu kapsamda birebir üçlü oran eşleşmesi bulunamadı.")
 
     with st.expander("4. Ayrıntılı model tahminleri", expanded=False):
         p1, p2, p3, p4 = st.columns(4)
