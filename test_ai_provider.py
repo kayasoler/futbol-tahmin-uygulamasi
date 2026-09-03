@@ -52,6 +52,17 @@ class AiProviderTests(unittest.TestCase):
         self.assertEqual(result["provider"], "Gemini")
         gemini.assert_called_once()
 
+    @patch("analysis._fetch_match_news")
+    @patch("analysis._groq_completion")
+    def test_continues_without_tavily_results(self, groq, news):
+        news.return_value = ([], [])
+        groq.return_value = (analysis.json.dumps(self.structured), "openai/gpt-oss-20b")
+
+        result = analysis.generate_grounded_analysis("groq", "tavily", self.match, self.report)
+
+        self.assertEqual(result["provider"], "Groq")
+        self.assertIn("yalnızca mevcut istatistik", result["search_warnings"][0])
+
 
 if __name__ == "__main__":
     unittest.main()
