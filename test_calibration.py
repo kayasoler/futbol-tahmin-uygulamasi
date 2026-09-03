@@ -8,6 +8,8 @@ from analysis import (
     market_odds_context,
     normalized_market_probabilities,
     odds_similarity_label,
+    exact_odds_diagnostic,
+    filter_exact_odds_rows,
     totals_odds_movement,
 )
 
@@ -59,6 +61,20 @@ class CalibrationRobustnessTests(unittest.TestCase):
         self.assertEqual(odds_similarity_label(0.0149), "Çok yakın")
         self.assertEqual(odds_similarity_label(0.04), "Geniş")
         self.assertIsNone(odds_similarity_label(0.051))
+
+    def test_exact_odds_are_separate_two_decimal_diagnostic(self):
+        match = {"b365_home": 1.70, "b365_draw": 3.50, "b365_away": 5.00}
+        rows = [
+            {"b365_home": 1.70, "b365_draw": 3.50, "b365_away": 5.00, "full_time_result": "H"},
+            {"b365_home": 1.70, "b365_draw": 3.49, "b365_away": 5.00, "full_time_result": "D"},
+        ]
+
+        exact = filter_exact_odds_rows(rows, match)
+        diagnostic = exact_odds_diagnostic(exact, "MS 1")
+
+        self.assertEqual(len(exact), 1)
+        self.assertEqual(diagnostic["confidence"], "Yetersiz")
+        self.assertEqual(diagnostic["relation"], "Karar için yetersiz")
     def test_canonical_source_url_removes_tracking(self):
         first = _canonical_source_url("https://Example.com/news/?utm_source=x&id=1#part")
         second = _canonical_source_url("https://example.com/news?id=1")
