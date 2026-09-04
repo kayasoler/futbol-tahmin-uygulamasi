@@ -32,6 +32,7 @@ from analysis_store import (
     load_analysis_history,
     load_latest_analysis,
     load_match_results,
+    restore_report_snapshot,
     save_analysis_version,
     save_match_result,
     update_analysis_artifacts,
@@ -610,6 +611,38 @@ def render_manual_fixture_tab(client: Client, today) -> None:
     st.rerun()
 
 
+def _comparison_evidence(rows: list[dict[str, object]]) -> dict[str, object]:
+    """Store complete aggregates and only the rows that the UI actually displays."""
+    return {
+        "sample_count": len(rows),
+        "summary": odds_summary_table(rows).to_dict(orient="records") if rows else [],
+        "rows": rows[:20],
+    }
+
+
+def _analysis_evidence(
+    match: dict[str, object],
+    h2h_rows: list[dict[str, object]],
+    same_league_rows: list[dict[str, object]],
+    same_all_rows: list[dict[str, object]],
+    model_ms: str,
+) -> dict[str, object]:
+    """Build a bounded, immutable snapshot of every historical section shown in the UI."""
+    exact_league_rows = filter_exact_odds_rows(same_league_rows, match)
+    exact_all_rows = filter_exact_odds_rows(same_all_rows, match)
+    exact_league = _comparison_evidence(exact_league_rows)
+    exact_all = _comparison_evidence(exact_all_rows)
+    exact_league["diagnostic"] = exact_odds_diagnostic(exact_league_rows, model_ms)
+    exact_all["diagnostic"] = exact_odds_diagnostic(exact_all_rows, model_ms)
+    return {
+        "h2h_rows": h2h_rows,
+        "same_league": _comparison_evidence(same_league_rows),
+        "same_all": _comparison_evidence(same_all_rows),
+        "exact_league": exact_league,
+        "exact_all": exact_all,
+    }
+
+
 def render_match_analysis(client: Client, match: dict[str, object]) -> None:
     requested_match = dict(match)
     latest_analysis, storage_error = load_latest_analysis(client, requested_match)
@@ -625,6 +658,9 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
     else:
         match = requested_match
 
+    analysis_record = latest_analysis if latest_analysis and not force_refresh else None
+    stored_report = restore_report_snapshot(analysis_record)
+
     home = str(match.get("home_team") or "")
     away = str(match.get("away_team") or "")
     division = str(match.get("division") or "")
@@ -634,12 +670,14 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
         f"{division} · {match.get('match_date', '—')} · {match.get('kickoff_time', '—')}"
     )
 
-    if latest_analysis and not force_refresh:
+    if analysis_record and stored_report:
         st.success(
             f"Kayıtlı analiz sürümü {latest_analysis.get('version')} kullanılıyor · "
             f"{latest_analysis.get('analyzed_at', '—')}"
         )
         st.caption("Bu açılışta Highlightly, Tavily ve Gemini kotası harcanmaz.")
+    elif analysis_record:
+        st.warning("Kayıtlı analiz snapshot'ı eksik veya bozuk; otomatik yeniden hesaplama yapılmadı.")
     if st.button(
         "Yeni oranlarla yeniden analiz et" if latest_analysis else "Analizi yenile",
         key=f"refresh_analysis_{requested_match.get('id')}",
@@ -648,33 +686,44 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
         st.session_state[refresh_key] = True
         st.rerun()
 
-    with st.spinner("Geçmiş rekabet ve aynı oran verileri hesaplanıyor..."):
-        try:
-            h2h_rows = fetch_h2h_rows(client, match)
-            league_rows = fetch_league_rows(client, division)
-            same_league_rows = fetch_same_odds_rows(client, match, division)
-            same_all_rows = fetch_same_odds_rows(client, match)
-            home_form_rows = fetch_team_form_rows(client, home, "home")
-            away_form_rows = fetch_team_form_rows(client, away, "away")
-            report = build_report(
-                match,
-                h2h_rows,
-                same_league_rows,
-                league_rows,
-                home_form_rows=home_form_rows,
-                away_form_rows=away_form_rows,
-                same_odds_all_rows=same_all_rows,
-            )
-            report["same_odds_all"] = same_all_rows
-            market_context = market_odds_context(match)
-            if market_context:
-                report["external_context"] = {"market_odds": market_context}
-        except Exception as exc:
-            st.error("Analiz verileri alınamadı.")
-            st.code(str(exc))
+    if analysis_record:
+        if stored_report is None:
+            st.info("Yeni ve geçerli bir sürüm oluşturmak için ‘Yeni oranlarla yeniden analiz et’ düğmesini kullanın.")
             return
+        report = stored_report
+    else:
+        with st.spinner("Geçmiş rekabet ve aynı oran verileri hesaplanıyor..."):
+            try:
+                h2h_rows = fetch_h2h_rows(client, match)
+                league_rows = fetch_league_rows(client, division)
+                same_league_rows = fetch_same_odds_rows(client, match, division)
+                same_all_rows = fetch_same_odds_rows(client, match)
+                home_form_rows = fetch_team_form_rows(client, home, "home")
+                away_form_rows = fetch_team_form_rows(client, away, "away")
+                report = build_report(
+                    match,
+                    h2h_rows,
+                    same_league_rows,
+                    league_rows,
+                    home_form_rows=home_form_rows,
+                    away_form_rows=away_form_rows,
+                    same_odds_all_rows=same_all_rows,
+                )
+                report["evidence"] = _analysis_evidence(
+                    match,
+                    h2h_rows,
+                    same_league_rows,
+                    same_all_rows,
+                    str((report.get("predictions") or {}).get("ms") or ""),
+                )
+                market_context = market_odds_context(match)
+                if market_context:
+                    report["external_context"] = {"market_odds": market_context}
+            except Exception as exc:
+                st.error("Analiz verileri alınamadı.")
+                st.code(str(exc))
+                return
 
-    analysis_record = latest_analysis if latest_analysis and not force_refresh else None
     if analysis_record:
         stored_context = dict(analysis_record.get("external_context") or {})
         if stored_context:
@@ -688,6 +737,19 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
             st.success(f"Analiz sürümü {analysis_record.get('version', 1)} veritabanına kaydedildi.")
     if storage_error and "match_analyses" in storage_error:
         st.caption("Kalıcı analiz önbelleği henüz kurulmamış olabilir.")
+
+    evidence = dict(report.get("evidence") or {})
+    h2h_rows = list(evidence.get("h2h_rows") or [])
+    same_league_evidence = dict(evidence.get("same_league") or {})
+    same_all_evidence = dict(evidence.get("same_all") or {})
+    exact_league_evidence = dict(evidence.get("exact_league") or {})
+    exact_all_evidence = dict(evidence.get("exact_all") or {})
+    legacy_evidence_missing = bool(analysis_record and not evidence)
+    if legacy_evidence_missing:
+        st.caption(
+            "Bu eski analiz sürümünde ayrıntılı kanıt satırları saklanmamış. "
+            "Tahmin snapshot'ı aynen gösteriliyor; geçmiş veri yeniden sorgulanmıyor."
+        )
 
     st.info(
         "İstatistiksel model geçmiş verilerle çalışır. Tavily güncel haberleri arar; "
@@ -778,6 +840,8 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
             st.dataframe(outcome_summary, use_container_width=True, hide_index=True)
             st.dataframe(goal_summary, use_container_width=True, hide_index=True)
             st.dataframe(rows_to_table(h2h_rows), use_container_width=True, hide_index=True)
+        elif legacy_evidence_missing:
+            st.info("H2H kanıt satırları bu eski snapshot sürümünde saklanmamış.")
         else:
             st.info("Bu iki takım arasında veritabanında geçmiş karşılaşma bulunamadı.")
 
@@ -797,39 +861,65 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
             "Marjı temizlenmiş olasılık toleransları kullanılır. Özet tüm eşleşmeleri, ayrıntı yalnızca en yakın 20 maçı gösterir."
         )
         st.markdown("##### A) Aynı ligde benzer oranlar")
-        if same_league_rows:
-            st.dataframe(odds_summary_table(same_league_rows), use_container_width=True, hide_index=True)
-            st.dataframe(rows_to_table(same_league_rows[:20]), use_container_width=True, hide_index=True)
+        if same_league_evidence.get("sample_count"):
+            st.dataframe(
+                pd.DataFrame(same_league_evidence.get("summary") or []),
+                use_container_width=True,
+                hide_index=True,
+            )
+            st.dataframe(
+                rows_to_table(list(same_league_evidence.get("rows") or [])),
+                use_container_width=True,
+                hide_index=True,
+            )
+        elif legacy_evidence_missing:
+            st.info("Benzer oran kanıtları bu eski snapshot sürümünde saklanmamış.")
         else:
             st.info("Bu ligde tolerans aralığına giren benzer piyasa bulunamadı.")
         st.markdown("##### B) Tüm liglerde benzer oranlar")
-        if same_all_rows:
-            st.dataframe(odds_summary_table(same_all_rows), use_container_width=True, hide_index=True)
-            st.dataframe(rows_to_table(same_all_rows[:20]), use_container_width=True, hide_index=True)
+        if same_all_evidence.get("sample_count"):
+            st.dataframe(
+                pd.DataFrame(same_all_evidence.get("summary") or []),
+                use_container_width=True,
+                hide_index=True,
+            )
+            st.dataframe(
+                rows_to_table(list(same_all_evidence.get("rows") or [])),
+                use_container_width=True,
+                hide_index=True,
+            )
+        elif legacy_evidence_missing:
+            st.info("Benzer oran kanıtları bu eski snapshot sürümünde saklanmamış.")
         else:
             st.info("Tüm geçmiş veriler içinde benzer piyasa bulunamadı.")
 
-    exact_league_rows = filter_exact_odds_rows(same_league_rows, match)
-    exact_all_rows = filter_exact_odds_rows(same_all_rows, match)
     with st.expander("3B. Birebir Bet365 oran doğrulaması · ana modeli etkilemez", expanded=False):
         st.caption(
             "Analiz anındaki MS 1/X/2 oranlarının iki ondalıkta tamamen aynı olduğu geçmiş "
             "maçlar gösterilir. Bu bölüm yalnızca ek fikir verir; tahmin ağırlıklarını değiştirmez."
         )
-        for title, exact_rows in (
-            ("Aynı ligde birebir oranlar", exact_league_rows),
-            ("Tüm liglerde birebir oranlar", exact_all_rows),
+        for title, exact_evidence in (
+            ("Aynı ligde birebir oranlar", exact_league_evidence),
+            ("Tüm liglerde birebir oranlar", exact_all_evidence),
         ):
             st.markdown(f"##### {title}")
-            diagnostic = exact_odds_diagnostic(exact_rows, predictions.get("ms") or "")
+            if legacy_evidence_missing:
+                st.info("Birebir oran kanıtları bu eski snapshot sürümünde saklanmamış.")
+                continue
+            exact_rows = list(exact_evidence.get("rows") or [])
+            diagnostic = dict(exact_evidence.get("diagnostic") or {})
+            if not diagnostic:
+                diagnostic = exact_odds_diagnostic([], predictions.get("ms") or "")
             exact_metrics = st.columns(4)
             exact_metrics[0].metric("Örneklem", diagnostic["count"])
             exact_metrics[1].metric("Güven", diagnostic["confidence"])
             exact_metrics[2].metric("En sık MS", diagnostic["leader"])
             exact_metrics[3].metric("Ana model ilişkisi", diagnostic["relation"])
-            if exact_rows:
+            if exact_evidence.get("sample_count"):
                 st.dataframe(
-                    odds_summary_table(exact_rows), use_container_width=True, hide_index=True
+                    pd.DataFrame(exact_evidence.get("summary") or []),
+                    use_container_width=True,
+                    hide_index=True,
                 )
                 st.dataframe(
                     rows_to_table(exact_rows[:20]), use_container_width=True, hide_index=True
