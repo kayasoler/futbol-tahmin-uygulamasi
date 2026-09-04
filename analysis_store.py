@@ -30,22 +30,9 @@ def json_safe(value: Any) -> Any:
 
 
 def compact_report(report: dict[str, Any]) -> dict[str, Any]:
-    """Keep durable outputs and bounded display evidence for immutable rendering."""
-    keys = ("predictions", "components", "warnings", "comment", "coupon", "evidence")
-    snapshot = {key: report.get(key) for key in keys}
-    snapshot["snapshot_version"] = 2
-    return json_safe(snapshot)
-
-
-def restore_report_snapshot(analysis: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Return a valid stored report without rebuilding it from mutable history."""
-    if not analysis:
-        return None
-    snapshot = analysis.get("report_snapshot")
-    predictions = snapshot.get("predictions") if isinstance(snapshot, dict) else None
-    if not isinstance(predictions, dict) or not predictions:
-        return None
-    return json_safe(snapshot)
+    """Keep durable outputs while avoiding duplicate historical/API payload storage."""
+    keys = ("predictions", "components", "warnings", "comment", "coupon")
+    return json_safe({key: report.get(key) for key in keys})
 
 
 def match_snapshot(match: dict[str, Any]) -> dict[str, Any]:
