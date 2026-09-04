@@ -25,9 +25,11 @@ Onemli:
 - IY/MS secili macin takim formlarindan hesaplanir ve 1/X/2 olarak gosterilir.
 - Arayuz her veri kaynaginin tahmine yuzde kac agirlikla katildigini ve veri uyarilarini gosterir.
 - Streamlit Secrets icinde GEMINI_API_KEY ve TAVILY_API_KEY varsa Gemini haberleri tum istatistiklerle birlestirip kendi tahminini ve kupon yorumunu uretir.
-- Aşama 20 ile API_FOOTBALL_KEY eklenirse tarih bazında dünya fikstürü, ülke/lig filtresi ve seçilen maçtan analiz başlatma ekranı açılır.
+- Aşama 24 ile API_FOOTBALL_KEY eklenirse tarih bazında dünya fikstürü, toplu kayıtlı analiz tablosu ve tıklanabilir detay ekranı açılır.
 - API-Football anahtarı GitHub dosyalarına yazılmaz; Streamlit Secrets içinde tutulur.
-- Birden fazla anahtar için API_FOOTBALL_KEYS = ["anahtar1", "anahtar2", "anahtar3"] kullanılabilir; kota veya anahtar hatasında sıradaki anahtar denenir.
+- Tek anahtar için API_FOOTBALL_KEY = "anahtar"; birden fazla anahtar için API_FOOTBALL_KEYS = ["anahtar1", "anahtar2"] kullanılır.
+- TOML tablo biçimi de desteklenir: [API_FOOTBALL_KEYS] altında primary = "anahtar1" ve backup = "anahtar2" yazılabilir.
+- API-Football anahtarı API-Sports hesabındaki API-Key değeridir; RapidAPI anahtarı doğrudan API-Sports uç noktasında kullanılamaz.
 - Seçilen maçın Bet365 oranı yalnızca kullanıcı istediğinde API'den alınır ve 30 dakika önbellekte tutulur.
 - Yaklaşık açılış oranı isteğe bağlıdır; boş bırakılırsa güncel oranla analiz devam eder.
 - Manuel açılış alanları 1-X-2 ile birlikte Bet365 2.5 Üst/Alt oranlarını da kabul eder ve iki piyasanın hareketini marjdan arındırarak gösterir.

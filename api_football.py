@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import re
+from collections.abc import Iterable, Mapping
 from datetime import date
-from typing import Any, Iterable
+from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -11,14 +13,46 @@ from urllib.request import Request, urlopen
 BASE_URL = "https://v3.football.api-sports.io"
 
 
-def normalize_api_keys(value: str | Iterable[str]) -> list[str]:
-    if isinstance(value, str):
-        candidates = value.replace(";", ",").split(",")
-    else:
-        candidates = list(value)
+def normalize_api_keys(value: Any) -> list[str]:
+    """Accept string, list, or TOML table secrets without treating field names as keys."""
+    candidates: list[str] = []
+
+    def collect(item: Any) -> None:
+        if item is None:
+            return
+        if isinstance(item, str):
+            candidates.extend(re.split(r"[;,\r\n]+", item))
+            return
+        if isinstance(item, Mapping) or hasattr(item, "items"):
+            mapping = dict(item.items())
+            preferred_names = {
+                "api_key", "api-football-key", "api_football_key", "key", "token", "value"
+            }
+            preferred_values = [
+                item_value
+                for item_name, item_value in mapping.items()
+                if str(item_name).strip().casefold() in preferred_names
+            ]
+            for item_value in preferred_values or list(mapping.values()):
+                collect(item_value)
+            return
+        if isinstance(item, Iterable):
+            for nested in item:
+                collect(nested)
+
+    collect(value)
     keys: list[str] = []
     for candidate in candidates:
-        key = str(candidate).strip()
+        key = candidate.strip()
+        lowered = key.casefold()
+        invalid = (
+            lowered in {"key", "token", "none", "null", "your_api_key", "api_key"}
+            or "missing application key" in lowered
+            or key.startswith(("{", "["))
+            or any(character.isspace() for character in key)
+        )
+        if invalid:
+            continue
         if key and key not in keys:
             keys.append(key)
     return keys
@@ -54,13 +88,21 @@ def _get(api_keys: str | Iterable[str], endpoint: str, params: dict[str, Any]) -
         errors = payload.get("errors") or []
         if errors:
             error_text = str(errors)
-            failures.append(f"anahtar {index + 1}: {error_text[:160]}")
             lowered = error_text.casefold()
+            if "missing application key" in lowered or "invalid api key" in lowered:
+                failures.append(f"anahtar {index + 1}: kimlik doğrulama reddedildi")
+                continue
+            failures.append(f"anahtar {index + 1}: {error_text[:160]}")
             if any(word in lowered for word in ("limit", "quota", "key", "request")):
                 continue
             raise RuntimeError(f"API-Football hata yanıtı: {errors}")
         return {"response": payload.get("response") or [], "quota": headers}
-    raise RuntimeError("API-Football anahtarlarının hiçbiri kullanılamadı. " + " | ".join(failures))
+    raise RuntimeError(
+        "API-Football anahtarlarının hiçbiri kullanılamadı. "
+        + " | ".join(failures)
+        + " Secrets biçimi: API_FOOTBALL_KEY = \"...\" veya "
+        "API_FOOTBALL_KEYS = [\"...\", \"...\"]."
+    )
 
 
 def normalize_fixture(item: dict[str, Any]) -> dict[str, Any]:

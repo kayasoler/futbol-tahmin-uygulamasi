@@ -1220,16 +1220,12 @@ def get_api_football_fixtures(api_keys: tuple[str, ...], fixture_date: str) -> d
 def get_api_football_keys() -> tuple[str, ...]:
     values: list[str] = []
     try:
-        configured = st.secrets["API_FOOTBALL_KEYS"]
-        if isinstance(configured, str):
-            values.extend(normalize_api_keys(configured))
-        else:
-            values.extend(normalize_api_keys(list(configured)))
+        values.extend(normalize_api_keys(st.secrets["API_FOOTBALL_KEYS"]))
     except (KeyError, FileNotFoundError, TypeError):
         pass
     try:
-        values.extend(normalize_api_keys(str(st.secrets["API_FOOTBALL_KEY"])))
-    except (KeyError, FileNotFoundError):
+        values.extend(normalize_api_keys(st.secrets["API_FOOTBALL_KEY"]))
+    except (KeyError, FileNotFoundError, TypeError):
         pass
     return tuple(normalize_api_keys(values))
 

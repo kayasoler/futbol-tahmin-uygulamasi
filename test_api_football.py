@@ -7,6 +7,23 @@ class ApiFootballTests(unittest.TestCase):
     def test_normalizes_and_deduplicates_api_keys(self):
         self.assertEqual(normalize_api_keys(" first,second;first "), ["first", "second"])
 
+    def test_normalizes_toml_table_and_nested_key_objects(self):
+        configured = {
+            "primary": {"token": "first"},
+            "backup": {"api_key": "second"},
+        }
+
+        self.assertEqual(normalize_api_keys(configured), ["first", "second"])
+
+    def test_rejects_field_names_and_api_error_payloads(self):
+        configured = [
+            "token",
+            {"token": "Error/Missing application key. Go to documentation."},
+            " valid-key ",
+        ]
+
+        self.assertEqual(normalize_api_keys(configured), ["valid-key"])
+
     def test_normalizes_fixture_for_analysis(self):
         row = normalize_fixture(
             {
