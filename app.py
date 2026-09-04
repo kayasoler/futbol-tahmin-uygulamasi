@@ -16,9 +16,11 @@ from analysis import (
     fetch_league_rows,
     fetch_same_odds_rows,
     fetch_team_form_rows,
+    filter_exact_odds_rows,
     generate_grounded_analysis,
     h2h_summary_tables,
     market_odds_context,
+    odds_summary_table,
     odds_movement,
     totals_odds_movement,
     rows_to_table,
@@ -35,13 +37,8 @@ from analysis_store import (
     save_match_result,
     update_analysis_artifacts,
 )
-from api_football import fetch_fixtures, normalize_api_keys
+from api_football import fetch_bet365_odds, fetch_fixtures, normalize_api_keys
 from football_data_live import fetch_current_fixtures
-from fixture_analysis import (
-    analyze_world_fixture,
-    build_analysis_evidence,
-    world_fixture_table_row,
-)
 from highlightly import (
     fetch_last_five,
     fetch_lineups,
@@ -51,6 +48,7 @@ from highlightly import (
     form_rows,
     selected_standings,
 )
+from league_mapping import division_for_api_league, match_team_name
 from results_api import fetch_match_result
 from data_import import (
     FIXTURE_REQUIRED_COLUMNS,
@@ -613,6 +611,38 @@ def render_manual_fixture_tab(client: Client, today) -> None:
     st.rerun()
 
 
+def _comparison_evidence(rows: list[dict[str, object]]) -> dict[str, object]:
+    """Store complete aggregates and only the rows that the UI actually displays."""
+    return {
+        "sample_count": len(rows),
+        "summary": odds_summary_table(rows).to_dict(orient="records") if rows else [],
+        "rows": rows[:20],
+    }
+
+
+def _analysis_evidence(
+    match: dict[str, object],
+    h2h_rows: list[dict[str, object]],
+    same_league_rows: list[dict[str, object]],
+    same_all_rows: list[dict[str, object]],
+    model_ms: str,
+) -> dict[str, object]:
+    """Build a bounded, immutable snapshot of every historical section shown in the UI."""
+    exact_league_rows = filter_exact_odds_rows(same_league_rows, match)
+    exact_all_rows = filter_exact_odds_rows(same_all_rows, match)
+    exact_league = _comparison_evidence(exact_league_rows)
+    exact_all = _comparison_evidence(exact_all_rows)
+    exact_league["diagnostic"] = exact_odds_diagnostic(exact_league_rows, model_ms)
+    exact_all["diagnostic"] = exact_odds_diagnostic(exact_all_rows, model_ms)
+    return {
+        "h2h_rows": h2h_rows,
+        "same_league": _comparison_evidence(same_league_rows),
+        "same_all": _comparison_evidence(same_all_rows),
+        "exact_league": exact_league,
+        "exact_all": exact_all,
+    }
+
+
 def render_match_analysis(client: Client, match: dict[str, object]) -> None:
     requested_match = dict(match)
     latest_analysis, storage_error = load_latest_analysis(client, requested_match)
@@ -679,7 +709,7 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
                     away_form_rows=away_form_rows,
                     same_odds_all_rows=same_all_rows,
                 )
-                report["evidence"] = build_analysis_evidence(
+                report["evidence"] = _analysis_evidence(
                     match,
                     h2h_rows,
                     same_league_rows,
@@ -1217,6 +1247,11 @@ def get_api_football_fixtures(api_keys: tuple[str, ...], fixture_date: str) -> d
     return fetch_fixtures(api_keys, fixture_date)
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def get_api_bet365_odds(api_keys: tuple[str, ...], fixture_id: int) -> dict[str, object]:
+    return fetch_bet365_odds(api_keys, fixture_id)
+
+
 def get_api_football_keys() -> tuple[str, ...]:
     values: list[str] = []
     try:
@@ -1391,142 +1426,102 @@ def render_football_data_fixtures_page(client: Client) -> None:
 
 
 def render_world_fixtures_page(client: Client) -> None:
-    st.caption("Aşama 24 · API-Football dünya fikstürü, toplu ön analiz ve kayıtlı detaylar")
+    st.caption("Aşama 20 · API-Football dünya fikstürü ve tek tıkla analiz")
     st.subheader("🌍 Dünya Fikstürü")
-    st.write(
-        "Seçilen tarihteki tüm API maçları listelenir. Geçmiş lig ve takım verisiyle "
-        "güvenilir eşleşen başlamamış maçlar tablo gösterilmeden önce analiz edilip kaydedilir."
-    )
     api_keys = get_api_football_keys()
     if not api_keys:
         st.info(
-            "Dünya fikstürünü açmak için Streamlit Secrets alanına "
-            "API_FOOTBALL_KEY veya API_FOOTBALL_KEYS ekleyin."
+            "Dünya fikstürünü açmak için API-Football ücretsiz anahtarını Streamlit "
+            "Secrets alanına API_FOOTBALL_KEY veya API_FOOTBALL_KEYS adıyla ekleyin."
         )
         return
+    st.caption(f"Hazır API-Football anahtarı: {len(api_keys)}")
 
     today = datetime.now(ZoneInfo("Europe/Istanbul")).date()
     fixture_date = st.date_input("Fikstür tarihi", value=today, key="api_fixture_date")
-    requested_date = fixture_date.isoformat()
-    if st.button(
-        "Fikstürü getir, tüm uygun maçları değerlendir ve kaydet",
-        type="primary",
-        use_container_width=True,
-    ):
-        try:
-            with st.spinner("Dünya genelindeki fikstür alınıyor..."):
-                api_result = get_api_football_fixtures(api_keys, requested_date)
-                all_fixtures = list(api_result.get("fixtures") or [])
-                available_divisions = set(fetch_recent_divisions(client))
-            outcomes: list[dict[str, object]] = []
-            league_cache: dict[str, list[dict[str, object]]] = {}
-            progress = st.progress(0, text="Maçlar değerlendiriliyor...")
-            total = len(all_fixtures)
-            processing_fixtures = sorted(
-                all_fixtures,
-                key=lambda fixture: (
-                    str(fixture.get("league_id") or ""),
-                    str(fixture.get("timestamp") or ""),
-                ),
-            )
-            active_league_id = None
-            for index, fixture in enumerate(processing_fixtures, start=1):
-                league_id = fixture.get("league_id")
-                if league_id != active_league_id:
-                    league_cache.clear()
-                    active_league_id = league_id
-                outcomes.append(
-                    analyze_world_fixture(client, fixture, available_divisions, league_cache)
+    if st.button("Bu tarihin tüm fikstürünü getir", type="primary", use_container_width=True):
+        with st.spinner("Dünya genelindeki fikstür alınıyor..."):
+            try:
+                st.session_state["api_fixture_result"] = get_api_football_fixtures(
+                    api_keys, fixture_date.isoformat()
                 )
-                progress.progress(
-                    index / max(total, 1),
-                    text=f"Değerlendirilen maç: {index}/{total}",
-                )
-            progress.empty()
-            outcomes.sort(
-                key=lambda outcome: (
-                    str((outcome.get("fixture") or {}).get("match_date") or ""),
-                    str((outcome.get("fixture") or {}).get("kickoff_time") or ""),
-                    str((outcome.get("fixture") or {}).get("country") or ""),
-                )
-            )
-            st.session_state["world_fixture_analysis"] = {
-                "date": requested_date,
-                "outcomes": outcomes,
-                "quota": api_result.get("quota") or {},
-            }
-            st.session_state.pop("world_fixture_selector", None)
-        except Exception as exc:
-            st.session_state["world_fixture_analysis"] = {
-                "date": requested_date,
-                "error": str(exc),
-            }
+                st.session_state["api_fixture_result_date"] = fixture_date.isoformat()
+            except Exception as exc:
+                st.session_state["api_fixture_result"] = {"error": str(exc)}
 
-    result = st.session_state.get("world_fixture_analysis")
-    if not isinstance(result, dict) or result.get("date") != requested_date:
-        st.caption(
-            "Tarihi seçip toplu değerlendirmeyi başlatın. Aynı tarih için mevcut kayıtlı "
-            "snapshotlar yeniden hesaplanmadan kullanılır."
-        )
+    result = st.session_state.get("api_fixture_result")
+    if not isinstance(result, dict):
+        st.caption("Tarihi seçip fikstürü getirin. Bir saat içinde aynı tarih tekrar API kotası harcamaz.")
         return
     if result.get("error"):
-        st.error("Dünya fikstürü değerlendirilemedi.")
-        st.caption(str(result["error"]))
+        st.error("API-Football fikstürü alınamadı.")
+        st.code(str(result["error"]))
         return
 
-    outcomes = list(result.get("outcomes") or [])
-    if not outcomes:
+    all_fixtures = list(result.get("fixtures") or [])
+    if not all_fixtures:
         st.info("Seçilen tarihte API kapsamında maç bulunamadı.")
         return
-    quota = dict(result.get("quota") or {})
-    if quota.get("daily_remaining") is not None:
-        st.caption(f"API-Football günlük kalan istek: {quota['daily_remaining']}")
+    quota = result.get("quota") or {}
+    remaining = quota.get("daily_remaining") if isinstance(quota, dict) else None
+    if remaining is not None:
+        key_number = quota.get("key_number") if isinstance(quota, dict) else None
+        key_label = f" · kullanılan anahtar: {key_number}" if key_number else ""
+        st.caption(f"API-Football günlük kalan istek: {remaining}{key_label}")
 
-    analyzed_statuses = {"Kayıtlı analiz", "Yeni kaydedildi"}
-    metric_columns = st.columns(4)
-    metric_columns[0].metric("Toplam fikstür", len(outcomes))
-    metric_columns[1].metric(
-        "Analizi hazır", sum(outcome.get("status") in analyzed_statuses for outcome in outcomes)
+    available_divisions = set(fetch_recent_divisions(client))
+    fixtures: list[dict[str, object]] = []
+    for row in all_fixtures:
+        division = division_for_api_league(row.get("league_id"), available_divisions)
+        if division:
+            prepared = dict(row)
+            prepared["division"] = division
+            fixtures.append(prepared)
+    skipped = len(all_fixtures) - len(fixtures)
+    st.info(
+        f"API'deki {len(all_fixtures)} maçtan tarihsel verisi bulunan liglerdeki "
+        f"{len(fixtures)} maç gösteriliyor. {skipped} desteklenmeyen maç analiz dışında bırakıldı."
     )
-    metric_columns[2].metric(
-        "Yeni kaydedilen", sum(outcome.get("status") == "Yeni kaydedildi" for outcome in outcomes)
-    )
-    metric_columns[3].metric(
-        "Destek dışı/hatalı", sum(outcome.get("status") not in analyzed_statuses for outcome in outcomes)
-    )
+    if not fixtures:
+        st.warning(
+            "Seçilen tarihte Supabase geçmiş verisiyle eşleşen bir API ligi bulunamadı."
+        )
+        return
 
-    countries = sorted(
-        {str((outcome.get("fixture") or {}).get("country") or "—") for outcome in outcomes},
-        key=str.casefold,
-    )
-    selected_countries = st.multiselect("Ülke filtresi", countries, key="world_countries")
+    countries = sorted({str(row["country"]) for row in fixtures}, key=str.casefold)
+    selected_countries = st.multiselect("Ülke filtresi", countries, key="api_countries")
     country_rows = [
-        outcome for outcome in outcomes
-        if not selected_countries
-        or str((outcome.get("fixture") or {}).get("country") or "—") in selected_countries
+        row for row in fixtures if not selected_countries or row["country"] in selected_countries
     ]
-    leagues = sorted(
-        {str((outcome.get("fixture") or {}).get("league") or "—") for outcome in country_rows},
-        key=str.casefold,
-    )
-    selected_leagues = st.multiselect("Lig filtresi", leagues, key="world_leagues")
+    leagues = sorted({str(row["league"]) for row in country_rows}, key=str.casefold)
+    selected_leagues = st.multiselect("Lig filtresi", leagues, key="api_leagues")
     visible = [
-        outcome for outcome in country_rows
-        if not selected_leagues
-        or str((outcome.get("fixture") or {}).get("league") or "—") in selected_leagues
+        row for row in country_rows if not selected_leagues or row["league"] in selected_leagues
     ]
 
-    st.caption(
-        "Bir satıra tıklayarak kaydedilmiş analiz detayını açın. Desteklenmeyen maçların "
-        "nedeni Açıklama sütununda gösterilir."
+    table = pd.DataFrame(
+        [
+            {
+                "Saat": row.get("kickoff_time") or "—",
+                "Ülke": row["country"],
+                "Lig": row["league"],
+                "Veri kodu": row["division"],
+                "Ev sahibi": row["home_team"],
+                "Deplasman": row["away_team"],
+                "Durum": row["status_text"],
+            }
+            for row in visible
+        ]
     )
+    st.metric("Gösterilen maç", len(visible))
+    st.caption("Analiz başlatmak için bir maç satırına tıklayın.")
     event = st.dataframe(
-        pd.DataFrame([world_fixture_table_row(outcome) for outcome in visible]),
+        table,
         use_container_width=True,
         hide_index=True,
         on_select="rerun",
         selection_mode="single-row",
-        key="world_fixture_selector",
+        key="api_fixture_selector",
     )
     selected_rows = getattr(getattr(event, "selection", None), "rows", [])
     if not selected_rows:
@@ -1534,11 +1529,93 @@ def render_world_fixtures_page(client: Client) -> None:
     selected_index = int(selected_rows[0])
     if not 0 <= selected_index < len(visible):
         return
-    selected = visible[selected_index]
-    analysis_match = selected.get("analysis_match")
-    if selected.get("status") not in analyzed_statuses or not isinstance(analysis_match, dict):
-        st.warning(str(selected.get("reason") or "Bu maç için kayıtlı analiz bulunmuyor."))
+    fixture = visible[selected_index]
+    st.markdown("#### Seçilen maçı analiz et")
+    st.write(f"**{fixture['home_team']} — {fixture['away_team']}**")
+    division = str(fixture["division"])
+    league_rows = fetch_league_rows(client, division)
+    historical_teams = sorted(
+        {
+            str(row.get(column)).strip()
+            for row in league_rows
+            for column in ("home_team", "away_team")
+            if row.get(column)
+        },
+        key=str.casefold,
+    )
+    home_name, home_score = match_team_name(str(fixture["home_team"]), historical_teams)
+    away_name, away_score = match_team_name(str(fixture["away_team"]), historical_teams)
+    if not home_name or not away_name:
+        st.warning(
+            "Bu maçın takım adları tarihsel CSV verisiyle güvenilir biçimde eşleşmediği için "
+            "analiz başlatılmadı. Yanlış takım geçmişi kullanmaktansa veri eşleştirmesi bekleniyor."
+        )
+        st.caption(
+            f"Eşleşme güveni — {fixture['home_team']}: %{home_score * 100:.0f}, "
+            f"{fixture['away_team']}: %{away_score * 100:.0f}"
+        )
         return
+    st.success(
+        f"Otomatik eşleşme · {fixture['league']} → {division} · "
+        f"{fixture['home_team']} → {home_name} · {fixture['away_team']} → {away_name}"
+    )
+    fixture_id = int(fixture["api_fixture_id"])
+    odds_state_key = f"api_bet365_odds_{fixture_id}"
+    if st.button("Güncel Bet365 oranını API'den getir", key=f"fetch_api_odds_{fixture_id}", use_container_width=True):
+        with st.spinner("Seçilen maçın Bet365 oranı aranıyor..."):
+            try:
+                st.session_state[odds_state_key] = get_api_bet365_odds(api_keys, fixture_id)
+            except Exception as exc:
+                st.session_state[odds_state_key] = {"error": str(exc)}
+    odds_result = st.session_state.get(odds_state_key)
+    current_odds: dict[str, object] = {}
+    if isinstance(odds_result, dict) and odds_result.get("error"):
+        st.warning("Güncel oran alınamadı; analiz oransız devam edebilir.")
+        st.caption(str(odds_result["error"]))
+    elif isinstance(odds_result, dict):
+        current_odds = dict(odds_result.get("odds") or {})
+        if current_odds:
+            st.success(
+                f"Güncel Bet365 · {current_odds['b365_home']:.2f} / "
+                f"{current_odds['b365_draw']:.2f} / {current_odds['b365_away']:.2f}"
+            )
+        else:
+            st.info("API bu maç için Bet365 1-X-2 oranı döndürmedi.")
+
+    with st.expander("İsteğe bağlı yaklaşık Bet365 açılış oranı"):
+        st.caption("Bulamazsanız üç alanı da 0 bırakın; analiz güncel oranla devam eder.")
+        opening_columns = st.columns(3)
+        opening_home = opening_columns[0].number_input("Açılış 1", min_value=0.0, value=0.0, step=0.01, key=f"opening_h_{fixture_id}")
+        opening_draw = opening_columns[1].number_input("Açılış X", min_value=0.0, value=0.0, step=0.01, key=f"opening_d_{fixture_id}")
+        opening_away = opening_columns[2].number_input("Açılış 2", min_value=0.0, value=0.0, step=0.01, key=f"opening_a_{fixture_id}")
+    movement_rows = odds_movement(
+        tuple(value if value > 1 else None for value in (opening_home, opening_draw, opening_away)),
+        tuple(current_odds.get(column) for column in ("b365_home", "b365_draw", "b365_away")),
+    )
+    if movement_rows:
+        movement_frame = pd.DataFrame(movement_rows)
+        for column in ("Açılış olasılığı", "Güncel olasılık", "Hareket"):
+            movement_frame[column] = movement_frame[column].map(lambda value: f"{value * 100:+.1f}%")
+        st.dataframe(movement_frame, use_container_width=True, hide_index=True)
+    analysis_match = {
+        "id": f"api-{fixture['api_fixture_id']}",
+        "division": division,
+        "match_date": fixture["match_date"],
+        "kickoff_time": fixture["kickoff_time"],
+        "home_team": home_name,
+        "away_team": away_name,
+        "b365_home": current_odds.get("b365_home"),
+        "b365_draw": current_odds.get("b365_draw"),
+        "b365_away": current_odds.get("b365_away"),
+        "opening_b365_home": opening_home if opening_home > 1 else None,
+        "opening_b365_draw": opening_draw if opening_draw > 1 else None,
+        "opening_b365_away": opening_away if opening_away > 1 else None,
+        "b365_over_25": None,
+        "b365_under_25": None,
+        "entry_method": "api-football",
+        "match_status": fixture["status"],
+        "raw_data": fixture["raw_data"],
+    }
     render_match_analysis(client, analysis_match)
 
 
@@ -2204,10 +2281,7 @@ require_login()
 with st.sidebar:
     section = st.radio(
         "Bölüm",
-        [
-            "Geçmiş Veri", "Yaklaşan Maçlar", "Güncel Fikstür", "Dünya Fikstürü",
-            "Analiz Geçmişi", "Model Testi",
-        ],
+        ["Geçmiş Veri", "Yaklaşan Maçlar", "Dünya Fikstürü", "Analiz Geçmişi", "Model Testi"],
         key="app_section",
     )
     st.caption("Maç analizi yapabilir veya modelin geçmiş performansını ölçebilirsiniz.")
@@ -2226,10 +2300,8 @@ try:
         render_historical_page(supabase)
     elif section == "Yaklaşan Maçlar":
         render_upcoming_page(supabase)
-    elif section == "Güncel Fikstür":
-        render_football_data_fixtures_page(supabase)
     elif section == "Dünya Fikstürü":
-        render_world_fixtures_page(supabase)
+        render_football_data_fixtures_page(supabase)
     elif section == "Analiz Geçmişi":
         render_analysis_history_page(supabase)
     else:
