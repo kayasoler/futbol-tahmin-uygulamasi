@@ -1,6 +1,12 @@
 import unittest
 
-from analysis_store import analysis_match_key, compact_report, evaluate_analysis, match_snapshot
+from analysis_store import (
+    analysis_match_key,
+    compact_report,
+    evaluate_analysis,
+    match_snapshot,
+    restore_report_snapshot,
+)
 
 
 class AnalysisStoreTests(unittest.TestCase):
@@ -11,14 +17,31 @@ class AnalysisStoreTests(unittest.TestCase):
         self.assertNotEqual(analysis_match_key(base), analysis_match_key(changed))
 
     def test_compact_report_excludes_historical_rows(self):
-        compact = compact_report({"predictions": {"ms": "1"}, "h2h": [{"large": "row"}]})
+        compact = compact_report({
+            "predictions": {"ms": "1"},
+            "evidence": {"h2h_rows": [{"bounded": "row"}]},
+            "h2h": [{"large": "row"}],
+        })
         self.assertEqual(compact["predictions"]["ms"], "1")
+        self.assertEqual(compact["snapshot_version"], 2)
+        self.assertEqual(compact["evidence"]["h2h_rows"][0]["bounded"], "row")
         self.assertNotIn("h2h", compact)
 
+    def test_restore_report_snapshot_rejects_missing_predictions(self):
+        self.assertIsNone(restore_report_snapshot(None))
+        self.assertIsNone(restore_report_snapshot({"report_snapshot": {"warnings": []}}))
+        restored = restore_report_snapshot({
+            "report_snapshot": {"predictions": {"ms": "MS 1"}}
+        })
+        self.assertEqual(restored["predictions"]["ms"], "MS 1")
+
     def test_snapshot_keeps_manual_and_csv_odds_separate(self):
-        snapshot = match_snapshot({"b365_home": 1.70, "csv_b365_home": 1.82})
+        snapshot = match_snapshot({
+            "b365_home": 1.70, "csv_b365_home": 1.82, "entry_method": "manual"
+        })
         self.assertEqual(snapshot["b365_home"], 1.70)
         self.assertEqual(snapshot["csv_b365_home"], 1.82)
+        self.assertEqual(snapshot["entry_method"], "manual")
 
     def test_evaluates_stored_prediction_against_score(self):
         analysis = {"report_snapshot": {"predictions": {
