@@ -48,7 +48,7 @@ from highlightly import (
     selected_standings,
 )
 from league_mapping import division_for_api_league, match_team_name
-from results_api import fetch_match_result
+from results_api import fetch_match_result, result_sync_page
 from data_import import (
     FIXTURE_REQUIRED_COLUMNS,
     REQUIRED_COLUMNS,
@@ -1598,6 +1598,11 @@ alter table public.match_results enable row level security;""",
             f"TheSportsDB kontrolü tamamlandı: {sync_message['checked']} maç kontrol edildi, "
             f"{sync_message['saved']} sonuç kaydedildi."
         )
+        if sync_message.get("waiting"):
+            st.caption(
+                f"{sync_message['waiting']} maç henüz final durumda değildi veya güvenilir "
+                "biçimde eşleşmedi; sonraki tur diğer sayfadan devam edecek."
+            )
         if sync_message["errors"]:
             st.caption(f"{sync_message['errors']} sorgu geçici hata nedeniyle tamamlanamadı.")
     if result_candidates and not result_error:
@@ -1613,9 +1618,14 @@ alter table public.match_results enable row level security;""",
                 thesportsdb_key = str(st.secrets["THESPORTSDB_API_KEY"]).strip()
             except (KeyError, FileNotFoundError):
                 thesportsdb_key = "123"
-            checked = saved = errors = 0
+            checked = saved = errors = waiting = 0
+            sync_batch, next_cursor = result_sync_page(
+                result_candidates,
+                cursor=int(st.session_state.get("automatic_result_sync_cursor", 0)),
+                page_size=20,
+            )
             with st.spinner("TheSportsDB üzerinden tamamlanan maçlar kontrol ediliyor..."):
-                for analysis in result_candidates[:20]:
+                for analysis in sync_batch:
                     checked += 1
                     try:
                         api_result = get_thesportsdb_result(
@@ -1625,6 +1635,7 @@ alter table public.match_results enable row level security;""",
                             str(analysis.get("away_team") or ""),
                         )
                         if not api_result:
+                            waiting += 1
                             continue
                         save_error = save_match_result(
                             client,
@@ -1639,8 +1650,9 @@ alter table public.match_results enable row level security;""",
                             saved += 1
                     except Exception:
                         errors += 1
+            st.session_state["automatic_result_sync_cursor"] = next_cursor
             st.session_state["automatic_result_sync_last"] = {
-                "checked": checked, "saved": saved, "errors": errors,
+                "checked": checked, "saved": saved, "waiting": waiting, "errors": errors,
             }
             st.session_state["automatic_result_sync_message"] = True
             st.rerun()
