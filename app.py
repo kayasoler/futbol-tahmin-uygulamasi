@@ -16,11 +16,9 @@ from analysis import (
     fetch_league_rows,
     fetch_same_odds_rows,
     fetch_team_form_rows,
-    filter_exact_odds_rows,
     generate_grounded_analysis,
     h2h_summary_tables,
     market_odds_context,
-    odds_summary_table,
     odds_movement,
     totals_odds_movement,
     rows_to_table,
@@ -32,9 +30,18 @@ from analysis_store import (
     load_analysis_history,
     load_latest_analysis,
     load_match_results,
+    restore_report_snapshot,
     save_analysis_version,
     save_match_result,
     update_analysis_artifacts,
+)
+from daily_fixture_analysis import (
+    SOURCE_LABELS,
+    analyze_daily_fixture,
+    build_analysis_evidence,
+    fixture_table_row,
+    normalize_upcoming_fixture,
+    resolve_fixture_duplicates,
 )
 from api_football import fetch_bet365_odds, fetch_fixtures, normalize_api_keys
 from football_data_live import fetch_current_fixtures
@@ -610,7 +617,9 @@ def render_manual_fixture_tab(client: Client, today) -> None:
     st.rerun()
 
 
-def render_match_analysis(client: Client, match: dict[str, object]) -> None:
+def render_match_analysis(
+    client: Client, match: dict[str, object], *, allow_refresh: bool = True
+) -> None:
     requested_match = dict(match)
     latest_analysis, storage_error = load_latest_analysis(client, requested_match)
     refresh_key = f"force_analysis_refresh_{requested_match.get('id')}"
@@ -625,6 +634,9 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
     else:
         match = requested_match
 
+    analysis_record = latest_analysis if latest_analysis and not force_refresh else None
+    stored_report = restore_report_snapshot(analysis_record)
+
     home = str(match.get("home_team") or "")
     away = str(match.get("away_team") or "")
     division = str(match.get("division") or "")
@@ -634,13 +646,15 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
         f"{division} · {match.get('match_date', '—')} · {match.get('kickoff_time', '—')}"
     )
 
-    if latest_analysis and not force_refresh:
+    if analysis_record and stored_report:
         st.success(
             f"Kayıtlı analiz sürümü {latest_analysis.get('version')} kullanılıyor · "
             f"{latest_analysis.get('analyzed_at', '—')}"
         )
         st.caption("Bu açılışta Highlightly, Tavily ve Gemini kotası harcanmaz.")
-    if st.button(
+    elif analysis_record:
+        st.warning("Kayıtlı analiz snapshot'ı eksik veya bozuk; otomatik yeniden hesaplama yapılmadı.")
+    if allow_refresh and st.button(
         "Yeni oranlarla yeniden analiz et" if latest_analysis else "Analizi yenile",
         key=f"refresh_analysis_{requested_match.get('id')}",
         use_container_width=True,
@@ -648,33 +662,41 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
         st.session_state[refresh_key] = True
         st.rerun()
 
-    with st.spinner("Geçmiş rekabet ve aynı oran verileri hesaplanıyor..."):
-        try:
-            h2h_rows = fetch_h2h_rows(client, match)
-            league_rows = fetch_league_rows(client, division)
-            same_league_rows = fetch_same_odds_rows(client, match, division)
-            same_all_rows = fetch_same_odds_rows(client, match)
-            home_form_rows = fetch_team_form_rows(client, home, "home")
-            away_form_rows = fetch_team_form_rows(client, away, "away")
-            report = build_report(
-                match,
-                h2h_rows,
-                same_league_rows,
-                league_rows,
-                home_form_rows=home_form_rows,
-                away_form_rows=away_form_rows,
-                same_odds_all_rows=same_all_rows,
-            )
-            report["same_odds_all"] = same_all_rows
-            market_context = market_odds_context(match)
-            if market_context:
-                report["external_context"] = {"market_odds": market_context}
-        except Exception as exc:
-            st.error("Analiz verileri alınamadı.")
-            st.code(str(exc))
+    if analysis_record:
+        if stored_report is None:
+            st.info("Yeni ve geçerli bir sürüm oluşturmak için yenileme düğmesini kullanın.")
             return
+        report = stored_report
+    else:
+        with st.spinner("Geçmiş rekabet ve aynı oran verileri hesaplanıyor..."):
+            try:
+                h2h_rows = fetch_h2h_rows(client, match)
+                league_rows = fetch_league_rows(client, division)
+                same_league_rows = fetch_same_odds_rows(client, match, division)
+                same_all_rows = fetch_same_odds_rows(client, match)
+                home_form_rows = fetch_team_form_rows(client, home, "home")
+                away_form_rows = fetch_team_form_rows(client, away, "away")
+                report = build_report(
+                    match,
+                    h2h_rows,
+                    same_league_rows,
+                    league_rows,
+                    home_form_rows=home_form_rows,
+                    away_form_rows=away_form_rows,
+                    same_odds_all_rows=same_all_rows,
+                )
+                report["evidence"] = build_analysis_evidence(
+                    match, h2h_rows, same_league_rows, same_all_rows,
+                    str((report.get("predictions") or {}).get("ms") or ""),
+                )
+                market_context = market_odds_context(match)
+                if market_context:
+                    report["external_context"] = {"market_odds": market_context}
+            except Exception as exc:
+                st.error("Analiz verileri alınamadı.")
+                st.code(str(exc))
+                return
 
-    analysis_record = latest_analysis if latest_analysis and not force_refresh else None
     if analysis_record:
         stored_context = dict(analysis_record.get("external_context") or {})
         if stored_context:
@@ -688,6 +710,19 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
             st.success(f"Analiz sürümü {analysis_record.get('version', 1)} veritabanına kaydedildi.")
     if storage_error and "match_analyses" in storage_error:
         st.caption("Kalıcı analiz önbelleği henüz kurulmamış olabilir.")
+
+    evidence = dict(report.get("evidence") or {})
+    h2h_rows = list(evidence.get("h2h_rows") or [])
+    same_league_evidence = dict(evidence.get("same_league") or {})
+    same_all_evidence = dict(evidence.get("same_all") or {})
+    exact_league_evidence = dict(evidence.get("exact_league") or {})
+    exact_all_evidence = dict(evidence.get("exact_all") or {})
+    legacy_evidence_missing = bool(analysis_record and not evidence)
+    if legacy_evidence_missing:
+        st.caption(
+            "Bu eski analiz sürümünde ayrıntılı kanıt satırları saklanmamış. "
+            "Tahmin snapshot'ı aynen gösteriliyor; geçmiş veri yeniden sorgulanmıyor."
+        )
 
     st.info(
         "İstatistiksel model geçmiş verilerle çalışır. Tavily güncel haberleri arar; "
@@ -778,6 +813,8 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
             st.dataframe(outcome_summary, use_container_width=True, hide_index=True)
             st.dataframe(goal_summary, use_container_width=True, hide_index=True)
             st.dataframe(rows_to_table(h2h_rows), use_container_width=True, hide_index=True)
+        elif legacy_evidence_missing:
+            st.info("H2H kanıt satırları bu eski snapshot sürümünde saklanmamış.")
         else:
             st.info("Bu iki takım arasında veritabanında geçmiş karşılaşma bulunamadı.")
 
@@ -797,39 +834,47 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
             "Marjı temizlenmiş olasılık toleransları kullanılır. Özet tüm eşleşmeleri, ayrıntı yalnızca en yakın 20 maçı gösterir."
         )
         st.markdown("##### A) Aynı ligde benzer oranlar")
-        if same_league_rows:
-            st.dataframe(odds_summary_table(same_league_rows), use_container_width=True, hide_index=True)
-            st.dataframe(rows_to_table(same_league_rows[:20]), use_container_width=True, hide_index=True)
+        if same_league_evidence.get("sample_count"):
+            st.dataframe(pd.DataFrame(same_league_evidence.get("summary") or []), use_container_width=True, hide_index=True)
+            st.dataframe(rows_to_table(list(same_league_evidence.get("rows") or [])), use_container_width=True, hide_index=True)
+        elif legacy_evidence_missing:
+            st.info("Benzer oran kanıtları bu eski snapshot sürümünde saklanmamış.")
         else:
             st.info("Bu ligde tolerans aralığına giren benzer piyasa bulunamadı.")
         st.markdown("##### B) Tüm liglerde benzer oranlar")
-        if same_all_rows:
-            st.dataframe(odds_summary_table(same_all_rows), use_container_width=True, hide_index=True)
-            st.dataframe(rows_to_table(same_all_rows[:20]), use_container_width=True, hide_index=True)
+        if same_all_evidence.get("sample_count"):
+            st.dataframe(pd.DataFrame(same_all_evidence.get("summary") or []), use_container_width=True, hide_index=True)
+            st.dataframe(rows_to_table(list(same_all_evidence.get("rows") or [])), use_container_width=True, hide_index=True)
+        elif legacy_evidence_missing:
+            st.info("Benzer oran kanıtları bu eski snapshot sürümünde saklanmamış.")
         else:
             st.info("Tüm geçmiş veriler içinde benzer piyasa bulunamadı.")
 
-    exact_league_rows = filter_exact_odds_rows(same_league_rows, match)
-    exact_all_rows = filter_exact_odds_rows(same_all_rows, match)
     with st.expander("3B. Birebir Bet365 oran doğrulaması · ana modeli etkilemez", expanded=False):
         st.caption(
             "Analiz anındaki MS 1/X/2 oranlarının iki ondalıkta tamamen aynı olduğu geçmiş "
             "maçlar gösterilir. Bu bölüm yalnızca ek fikir verir; tahmin ağırlıklarını değiştirmez."
         )
-        for title, exact_rows in (
-            ("Aynı ligde birebir oranlar", exact_league_rows),
-            ("Tüm liglerde birebir oranlar", exact_all_rows),
+        for title, exact_evidence in (
+            ("Aynı ligde birebir oranlar", exact_league_evidence),
+            ("Tüm liglerde birebir oranlar", exact_all_evidence),
         ):
             st.markdown(f"##### {title}")
-            diagnostic = exact_odds_diagnostic(exact_rows, predictions.get("ms") or "")
+            if legacy_evidence_missing:
+                st.info("Birebir oran kanıtları bu eski snapshot sürümünde saklanmamış.")
+                continue
+            exact_rows = list(exact_evidence.get("rows") or [])
+            diagnostic = dict(exact_evidence.get("diagnostic") or {})
+            if not diagnostic:
+                diagnostic = exact_odds_diagnostic([], predictions.get("ms") or "")
             exact_metrics = st.columns(4)
             exact_metrics[0].metric("Örneklem", diagnostic["count"])
             exact_metrics[1].metric("Güven", diagnostic["confidence"])
             exact_metrics[2].metric("En sık MS", diagnostic["leader"])
             exact_metrics[3].metric("Ana model ilişkisi", diagnostic["relation"])
-            if exact_rows:
+            if exact_evidence.get("sample_count"):
                 st.dataframe(
-                    odds_summary_table(exact_rows), use_container_width=True, hide_index=True
+                    pd.DataFrame(exact_evidence.get("summary") or []), use_container_width=True, hide_index=True
                 )
                 st.dataframe(
                     rows_to_table(exact_rows[:20]), use_container_width=True, hide_index=True
@@ -892,16 +937,35 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
             "home_form": stored_external.get("home_last_five") or [],
             "away_form": stored_external.get("away_last_five") or [],
         }
-    if has_stored_team_context:
+    team_button, lineup_button = st.columns(2)
+    team_context_requested = team_button.button(
+        "Güncel form ve puan durumunu getir",
+        key=f"highlightly_context_button_{match.get('id')}",
+        use_container_width=True,
+    )
+    lineup_requested = lineup_button.button(
+        "Kesin kadroları kontrol et",
+        key=f"highlightly_lineups_button_{match.get('id')}",
+        use_container_width=True,
+    )
+    if has_stored_team_context and not (team_context_requested or lineup_requested):
         st.info("Kayıtlı takım bağlamı kullanılıyor; Highlightly çağrısı yapılmadı.")
-    elif not highlightly_api_key:
+    if not highlightly_api_key:
         st.info("Highlightly verileri için HIGHLIGHTLY_API_KEY tanımlanmalıdır.")
-    elif st.button("Güncel form ve puan durumunu getir", key=f"highlightly_context_button_{match.get('id')}", use_container_width=True):
+    elif team_context_requested or lineup_requested:
         with st.spinner("Highlightly takım eşleşmesi ve güncel veriler alınıyor..."):
             try:
-                st.session_state[context_state_key] = get_highlightly_context(
-                    highlightly_api_key, str(match.get("match_date") or ""), home, away
-                )
+                live = st.session_state.get(context_state_key)
+                if not isinstance(live, dict) or not live.get("match"):
+                    live = get_highlightly_context(
+                        highlightly_api_key, str(match.get("match_date") or ""), home, away
+                    )
+                    st.session_state[context_state_key] = live
+                if lineup_requested and isinstance(live, dict) and live.get("match"):
+                    requested_match_id = int(live["match"]["id"])
+                    st.session_state[f"highlightly_lineup_result_{requested_match_id}"] = (
+                        get_highlightly_lineups(highlightly_api_key, requested_match_id)
+                    )
                 context_changed = True
             except Exception as exc:
                 st.session_state[context_state_key] = {"error": str(exc)}
@@ -929,12 +993,6 @@ def render_match_analysis(client: Client, match: dict[str, object]) -> None:
             "highlightly_match_id": live_context.get("match", {}).get("id"),
         })
         match_id = int(live_context["match"]["id"])
-        if match_id and st.button("Kesin kadroları kontrol et", key=f"highlightly_lineups_{match_id}", use_container_width=True):
-            try:
-                st.session_state[f"highlightly_lineup_result_{match_id}"] = get_highlightly_lineups(highlightly_api_key, match_id)
-                context_changed = True
-            except Exception as exc:
-                st.session_state[f"highlightly_lineup_result_{match_id}"] = {"error": str(exc)}
         lineup_result = st.session_state.get(f"highlightly_lineup_result_{match_id}")
         if isinstance(lineup_result, dict) and lineup_result.get("error"):
             st.caption("Kadrolar henüz yayımlanmamış olabilir: " + str(lineup_result["error"]))
@@ -1238,101 +1296,223 @@ def get_thesportsdb_result(
     return fetch_match_result(api_key, match_date, home_team, away_team)
 
 
+def fetch_fixture_rows_for_date(client: Client, match_date: str) -> list[dict[str, object]]:
+    response = (
+        client.table("upcoming_matches")
+        .select(
+            "id,division,match_date,kickoff_time,home_team,away_team,"
+            "b365_home,b365_draw,b365_away,b365_over_25,b365_under_25,"
+            "entry_method,match_status,raw_data"
+        )
+        .eq("match_date", match_date)
+        .order("kickoff_time")
+        .limit(1000)
+        .execute()
+    )
+    return [normalize_upcoming_fixture(dict(row)) for row in (response.data or [])]
+
+
+def render_fixture_odds_refresh(
+    client: Client,
+    outcome: dict[str, object],
+    outcomes: list[dict[str, object]],
+    outcome_index: int,
+    result_key: str,
+) -> None:
+    match = dict(outcome.get("analysis_match") or outcome.get("fixture") or {})
+    identity = str(match.get("id") or f"{match.get('division')}-{match.get('home_team')}-{match.get('away_team')}")
+
+    def odd_value(name: str) -> float:
+        try:
+            return float(match.get(name) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    with st.expander("Oranları düzenle ve yeni analiz sürümü oluştur", expanded=False):
+        st.caption("Mevcut kayıt değişmez. Bu işlem yeni bir analiz sürümü kaydeder.")
+        with st.form(f"fixture_odds_{identity}"):
+            st.markdown("##### Yaklaşık Bet365 açılış oranları")
+            opening_ms_columns = st.columns(3)
+            opening_home = opening_ms_columns[0].number_input("Açılış 1", min_value=0.0, value=odd_value("opening_b365_home"), step=0.01)
+            opening_draw = opening_ms_columns[1].number_input("Açılış X", min_value=0.0, value=odd_value("opening_b365_draw"), step=0.01)
+            opening_away = opening_ms_columns[2].number_input("Açılış 2", min_value=0.0, value=odd_value("opening_b365_away"), step=0.01)
+            opening_total_columns = st.columns(2)
+            opening_over = opening_total_columns[0].number_input("Açılış 2.5 Üst", min_value=0.0, value=odd_value("opening_b365_over_25"), step=0.01)
+            opening_under = opening_total_columns[1].number_input("Açılış 2.5 Alt", min_value=0.0, value=odd_value("opening_b365_under_25"), step=0.01)
+
+            st.markdown("##### Analiz anındaki Bet365 oranları")
+            current_ms_columns = st.columns(3)
+            current_home = current_ms_columns[0].number_input("Analiz anı 1", min_value=0.0, value=odd_value("b365_home"), step=0.01)
+            current_draw = current_ms_columns[1].number_input("Analiz anı X", min_value=0.0, value=odd_value("b365_draw"), step=0.01)
+            current_away = current_ms_columns[2].number_input("Analiz anı 2", min_value=0.0, value=odd_value("b365_away"), step=0.01)
+            current_total_columns = st.columns(2)
+            current_over = current_total_columns[0].number_input("Analiz anı 2.5 Üst", min_value=0.0, value=odd_value("b365_over_25"), step=0.01)
+            current_under = current_total_columns[1].number_input("Analiz anı 2.5 Alt", min_value=0.0, value=odd_value("b365_under_25"), step=0.01)
+            submitted = st.form_submit_button(
+                "Oranları kaydet ve yeni analiz sürümü oluştur",
+                type="primary",
+                use_container_width=True,
+            )
+    if not submitted:
+        return
+    if not all(value > 1 for value in (current_home, current_draw, current_away)):
+        st.error("Analiz anı MS 1/X/2 oranlarının üçünü birlikte girin.")
+        return
+    if any(value > 0 for value in (opening_home, opening_draw, opening_away)) and not all(
+        value > 1 for value in (opening_home, opening_draw, opening_away)
+    ):
+        st.error("Açılış MS oranlarının üçünü birlikte girin veya üçünü de boş bırakın.")
+        return
+    if any(value > 0 for value in (current_over, current_under)) and not all(
+        value > 1 for value in (current_over, current_under)
+    ):
+        st.error("Analiz anı 2.5 Üst/Alt oranlarını birlikte girin veya boş bırakın.")
+        return
+    if any(value > 0 for value in (opening_over, opening_under)) and not all(
+        value > 1 for value in (opening_over, opening_under)
+    ):
+        st.error("Açılış 2.5 Üst/Alt oranlarını birlikte girin veya boş bırakın.")
+        return
+
+    if str(match.get("entry_method")) == "football-data-live":
+        for name in ("b365_home", "b365_draw", "b365_away", "b365_over_25", "b365_under_25"):
+            match[f"csv_{name}"] = match.get(name)
+    match.update({
+        "opening_b365_home": opening_home or None,
+        "opening_b365_draw": opening_draw or None,
+        "opening_b365_away": opening_away or None,
+        "opening_b365_over_25": opening_over or None,
+        "opening_b365_under_25": opening_under or None,
+        "b365_home": current_home,
+        "b365_draw": current_draw,
+        "b365_away": current_away,
+        "b365_over_25": current_over or None,
+        "b365_under_25": current_under or None,
+        "analysis_odds_source": "Manuel analiz anı oranı",
+    })
+    refreshed = analyze_daily_fixture(client, match, {}, force_refresh=True)
+    if refreshed.get("report"):
+        outcomes[outcome_index] = refreshed
+        st.session_state[result_key]["outcomes"] = outcomes
+        st.success("Yeni analiz sürümü kaydedildi.")
+        st.rerun()
+    st.error("Yeni analiz sürümü oluşturulamadı: " + str(refreshed.get("reason") or "Bilinmeyen hata"))
+
+
 def render_football_data_fixtures_page(client: Client) -> None:
-    st.caption("Aşama 23 · Football-Data güncel fikstürü ve Highlightly canlı bağlamı")
-    st.subheader("🌍 Güncel Fikstür")
-    st.caption("Fikstür ve oranlar Football-Data.co.uk kaynağından alınır; API kotası harcanmaz.")
+    st.caption("Dünya Fikstürü · seçilen gün için istatistiksel ön analiz")
+    st.subheader("🌍 Dünya Fikstürü")
+    st.write(
+        "Football-Data, manuel ve CSV maçları ayrı bölümlerde gösterilir. İstatistiksel "
+        "analiz toplu hazırlanır; haber/yapay zekâ ve kadro yalnızca seçtiğiniz maçta çalışır."
+    )
     today = datetime.now(ZoneInfo("Europe/Istanbul")).date()
     if "last_manual_fixture" in st.session_state:
         st.success(st.session_state.pop("last_manual_fixture"))
     with st.expander("➕ Manuel maç ekle", expanded=False):
         render_manual_fixture_tab(client, today)
-    with st.expander("📋 Manuel ve dosyadan eklenen maçları göster", expanded=False):
-        render_upcoming_list_tab(client, today)
-    if st.button(
-        "🔄 Fikstürü yenile",
-        key="refresh_football_data_fixtures",
+
+    selected_date = st.date_input("Fikstür tarihi", value=today, key="daily_fixture_date")
+    requested_date = selected_date.isoformat()
+    result_key = "daily_fixture_analysis_result"
+    action_left, action_right = st.columns([3, 1])
+    run_analysis = action_left.button(
+        "Seçilen günün fikstürünü getir ve analiz et",
         type="primary",
         use_container_width=True,
-    ):
+    )
+    if action_right.button("Kaynağı yenile", use_container_width=True):
         get_football_data_fixtures.clear()
-        st.session_state.pop("football_data_fixture_selector", None)
-        st.session_state["football_data_fixture_refreshed"] = True
-        st.rerun()
-    if st.session_state.pop("football_data_fixture_refreshed", False):
-        st.success("Fikstür Football-Data sitesinden yeniden alındı.")
-    try:
-        fixtures = get_football_data_fixtures()
-    except Exception as exc:
-        st.error("Football-Data güncel fikstürü alınamadı.")
-        st.caption(str(exc))
+        st.success("Football-Data önbelleği temizlendi; sonraki çalıştırmada güncel dosya alınacak.")
+    if run_analysis:
+        try:
+            stored_rows = fetch_fixture_rows_for_date(client, requested_date)
+        except Exception as exc:
+            st.error("Manuel ve CSV maçları alınamadı.")
+            st.caption(str(exc))
+            return
+        source_warning = ""
+        try:
+            football_data_rows = [
+                dict(row) for row in get_football_data_fixtures()
+                if str(row.get("match_date") or "") == requested_date
+            ]
+        except Exception as exc:
+            football_data_rows = []
+            source_warning = "Football-Data alınamadı; manuel ve CSV kayıtları işlendi: " + str(exc)
+        fixtures, dropped = resolve_fixture_duplicates(football_data_rows + stored_rows)
+        outcomes: list[dict[str, object]] = []
+        league_cache: dict[str, list[dict[str, object]]] = {}
+        progress = st.progress(0, text="Maçlar istatistiksel olarak değerlendiriliyor...")
+        for index, fixture in enumerate(fixtures, start=1):
+            outcomes.append(analyze_daily_fixture(client, fixture, league_cache))
+            progress.progress(index / max(len(fixtures), 1), text=f"Değerlendirilen maç: {index}/{len(fixtures)}")
+        progress.empty()
+        st.session_state[result_key] = {
+            "date": requested_date,
+            "outcomes": outcomes,
+            "duplicate_count": len(dropped),
+            "source_warning": source_warning,
+        }
+
+    result = st.session_state.get(result_key)
+    if not isinstance(result, dict) or result.get("date") != requested_date:
+        st.caption("Tarihi seçip analizi başlatın. Kayıtlı analizler otomatik yeniden hesaplanmaz.")
         return
-    try:
-        available_divisions = set(get_supported_divisions())
-    except Exception as exc:
-        st.error("Geçmiş verisi bulunan ligler geçici bağlantı hatası nedeniyle alınamadı.")
-        st.caption("Sayfayı yenileyip tekrar deneyin. Ayrıntı: " + str(exc))
-        return
-    supported = [row for row in fixtures if str(row.get("division")) in available_divisions]
-    if not supported:
-        st.warning("Güncel dosyada geçmiş verimizle eşleşen fikstür bulunamadı.")
-        return
-    dates = sorted({str(row["match_date"]) for row in supported})
-    selected_date = st.selectbox("Fikstür tarihi", dates, index=0)
-    date_rows = [row for row in supported if row["match_date"] == selected_date]
-    divisions = sorted({str(row["division"]) for row in date_rows})
-    selected_divisions = st.multiselect("Lig filtresi", divisions)
-    visible = [row for row in date_rows if not selected_divisions or row["division"] in selected_divisions]
-    st.metric("Gösterilen maç", len(visible))
-    table = pd.DataFrame([{
-        "Saat": row.get("kickoff_time") or "—", "Lig": row["division"],
-        "Ev sahibi": row["home_team"], "Deplasman": row["away_team"],
-        "FD referans 1": row.get("b365_home") or "—", "FD referans X": row.get("b365_draw") or "—",
-        "FD referans 2": row.get("b365_away") or "—",
-    } for row in visible])
-    event = st.dataframe(table, use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single-row", key="football_data_fixture_selector")
-    selected_rows = getattr(getattr(event, "selection", None), "rows", [])
-    if selected_rows:
-        index = int(selected_rows[0])
-        if 0 <= index < len(visible):
-            match = dict(visible[index])
-            csv_odds = {
-                "b365_home": match.get("b365_home"),
-                "b365_draw": match.get("b365_draw"),
-                "b365_away": match.get("b365_away"),
-                "b365_over_25": match.get("b365_over_25"),
-                "b365_under_25": match.get("b365_under_25"),
-            }
-            with st.expander("İsteğe bağlı yaklaşık Bet365 açılış oranı"):
-                columns = st.columns(3)
-                match["opening_b365_home"] = columns[0].number_input("Açılış 1", min_value=0.0, value=0.0, step=0.01, key=f"fd_open_h_{match['id']}") or None
-                match["opening_b365_draw"] = columns[1].number_input("Açılış X", min_value=0.0, value=0.0, step=0.01, key=f"fd_open_d_{match['id']}") or None
-                match["opening_b365_away"] = columns[2].number_input("Açılış 2", min_value=0.0, value=0.0, step=0.01, key=f"fd_open_a_{match['id']}") or None
-                total_columns = st.columns(2)
-                match["opening_b365_over_25"] = total_columns[0].number_input("Açılış 2.5 Üst", min_value=0.0, value=0.0, step=0.01, key=f"fd_open_o25_{match['id']}") or None
-                match["opening_b365_under_25"] = total_columns[1].number_input("Açılış 2.5 Alt", min_value=0.0, value=0.0, step=0.01, key=f"fd_open_u25_{match['id']}") or None
-            with st.expander("Analiz anında gördüğünüz Bet365 oranları"):
-                st.caption(
-                    "Bir kez girmeniz yeterlidir. Üçlü MS veya ikili 2.5 grubunu eksiksiz girin; "
-                    "boş grup için Football-Data referans oranı kullanılır."
-                )
-                current_columns = st.columns(3)
-                current_home = current_columns[0].number_input("Analiz anı 1", min_value=0.0, value=0.0, step=0.01, key=f"fd_now_h_{match['id']}")
-                current_draw = current_columns[1].number_input("Analiz anı X", min_value=0.0, value=0.0, step=0.01, key=f"fd_now_d_{match['id']}")
-                current_away = current_columns[2].number_input("Analiz anı 2", min_value=0.0, value=0.0, step=0.01, key=f"fd_now_a_{match['id']}")
-                current_total_columns = st.columns(2)
-                current_over = current_total_columns[0].number_input("Analiz anı 2.5 Üst", min_value=0.0, value=0.0, step=0.01, key=f"fd_now_o25_{match['id']}")
-                current_under = current_total_columns[1].number_input("Analiz anı 2.5 Alt", min_value=0.0, value=0.0, step=0.01, key=f"fd_now_u25_{match['id']}")
-            for name, value in csv_odds.items():
-                match[f"csv_{name}"] = value
-            if all(value > 1 for value in (current_home, current_draw, current_away)):
-                match.update({"b365_home": current_home, "b365_draw": current_draw, "b365_away": current_away})
-                match["analysis_odds_source"] = "Manuel analiz anı oranı"
-            else:
-                match["analysis_odds_source"] = "Football-Data referans oranı"
-            if all(value > 1 for value in (current_over, current_under)):
-                match.update({"b365_over_25": current_over, "b365_under_25": current_under})
-            render_match_analysis(client, match)
+    if result.get("source_warning"):
+        st.warning(str(result["source_warning"]))
+    if result.get("duplicate_count"):
+        st.info(
+            f"{result['duplicate_count']} yinelenen maç tekilleştirildi. Manuel kayıt varsa manuel oranlar kullanıldı."
+        )
+    outcomes = list(result.get("outcomes") or [])
+    analyzable = [outcome for outcome in outcomes if outcome.get("report")]
+    failed = [outcome for outcome in outcomes if not outcome.get("report")]
+    metric_columns = st.columns(3)
+    metric_columns[0].metric("Toplam maç", len(outcomes))
+    metric_columns[1].metric("Analiz hazır", len(analyzable))
+    metric_columns[2].metric("Analiz edilemedi", len(failed))
+
+    selected_pair: tuple[int, dict[str, object]] | None = None
+    for source in ("football-data-live", "manual", "csv"):
+        indexed = [(index, outcome) for index, outcome in enumerate(outcomes) if outcome.get("report") and outcome.get("source") == source]
+        st.markdown(f"#### {SOURCE_LABELS[source]}")
+        if not indexed:
+            st.caption("Bu kaynakta seçilen güne ait analiz edilebilir maç yok.")
+            continue
+        source_outcomes = [outcome for _, outcome in indexed]
+        event = st.dataframe(
+            pd.DataFrame([fixture_table_row(outcome) for outcome in source_outcomes]),
+            use_container_width=True,
+            hide_index=True,
+            on_select="rerun",
+            selection_mode="single-row",
+            key=f"daily_fixture_selector_{source}",
+        )
+        selected_rows = getattr(getattr(event, "selection", None), "rows", [])
+        if selected_rows:
+            selected_index = int(selected_rows[0])
+            if 0 <= selected_index < len(indexed):
+                selected_pair = indexed[selected_index]
+
+    st.markdown("#### Analiz edilemeyenler")
+    if failed:
+        st.dataframe(pd.DataFrame([{
+            "Kaynak": SOURCE_LABELS.get(str(outcome.get("source")), "CSV"),
+            "Saat": str((outcome.get("fixture") or {}).get("kickoff_time") or "—")[:5],
+            "Lig": (outcome.get("fixture") or {}).get("division") or "—",
+            "Maç": f"{(outcome.get('fixture') or {}).get('home_team') or '—'} — {(outcome.get('fixture') or {}).get('away_team') or '—'}",
+            "Neden": outcome.get("reason") or "Bilinmeyen neden",
+        } for outcome in failed]), use_container_width=True, hide_index=True)
+    else:
+        st.caption("Bu çalıştırmada analiz edilemeyen maç yok.")
+
+    if selected_pair:
+        outcome_index, selected_outcome = selected_pair
+        render_fixture_odds_refresh(client, selected_outcome, outcomes, outcome_index, result_key)
+        analysis_match = dict(selected_outcome.get("analysis_match") or {})
+        if analysis_match:
+            render_match_analysis(client, analysis_match, allow_refresh=False)
 
 
 def render_world_fixtures_page(client: Client) -> None:
