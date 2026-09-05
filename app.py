@@ -44,7 +44,7 @@ from daily_fixture_analysis import (
     resolve_fixture_duplicates,
 )
 from api_football import fetch_bet365_odds, fetch_fixtures, normalize_api_keys
-from football_data_live import fetch_current_fixtures
+from football_data_live import fetch_current_fixtures, parse_uploaded_fixtures
 from highlightly import (
     fetch_last_five,
     fetch_lineups,
@@ -1412,18 +1412,52 @@ def render_football_data_fixtures_page(client: Client) -> None:
     with st.expander("➕ Manuel maç ekle", expanded=False):
         render_manual_fixture_tab(client, today)
 
+    with st.expander("📄 Football-Data erişilemezse CSV yedeği", expanded=False):
+        uploaded_fixture_file = st.file_uploader(
+            "fixtures.csv dosyasını seçin",
+            type=["csv"],
+            key="daily_fixture_fallback_csv",
+        )
+        st.caption(
+            "Football-Data biçimi kullanılır: Div, Date, Time, HomeTeam, AwayTeam, "
+            "B365H, B365D ve B365A sütunları zorunludur. Dosya yalnızca bu çalıştırmada kullanılır."
+        )
+
     selected_date = st.date_input("Fikstür tarihi", value=today, key="daily_fixture_date")
     requested_date = selected_date.isoformat()
     result_key = "daily_fixture_analysis_result"
+    snapshot_key = "football_data_fixture_snapshot"
+    snapshot_time_key = "football_data_fixture_snapshot_time"
+    source_error_key = "football_data_fixture_source_error"
     action_left, action_right = st.columns([3, 1])
     run_analysis = action_left.button(
         "Seçilen günün fikstürünü getir ve analiz et",
         type="primary",
         use_container_width=True,
     )
-    if action_right.button("Kaynağı yenile", use_container_width=True):
-        get_football_data_fixtures.clear()
-        st.success("Football-Data önbelleği temizlendi; sonraki çalıştırmada güncel dosya alınacak.")
+    refresh_source = action_right.button("Kaynağı yenile", use_container_width=True)
+    if refresh_source:
+        with st.spinner("Football-Data yeniden deneniyor..."):
+            try:
+                refreshed_rows = fetch_current_fixtures()
+                st.session_state[snapshot_key] = refreshed_rows
+                st.session_state[snapshot_time_key] = datetime.now(
+                    ZoneInfo("Europe/Istanbul")
+                ).strftime("%d.%m.%Y %H:%M")
+                st.session_state.pop(source_error_key, None)
+                st.success("Football-Data fikstürü başarıyla yenilendi.")
+            except Exception as exc:
+                st.session_state[source_error_key] = str(exc)
+                if st.session_state.get(snapshot_key):
+                    st.warning(
+                        "Football-Data hâlâ erişilemiyor; son başarılı fikstür korundu. "
+                        + str(exc)
+                    )
+                else:
+                    st.warning(
+                        "Football-Data hâlâ erişilemiyor. CSV yedeği veya manuel kayıt kullanabilirsiniz. "
+                        + str(exc)
+                    )
     if run_analysis:
         try:
             stored_rows = fetch_fixture_rows_for_date(client, requested_date)
@@ -1431,16 +1465,40 @@ def render_football_data_fixtures_page(client: Client) -> None:
             st.error("Manuel ve CSV maçları alınamadı.")
             st.caption(str(exc))
             return
-        source_warning = ""
-        try:
-            football_data_rows = [
-                dict(row) for row in get_football_data_fixtures()
-                if str(row.get("match_date") or "") == requested_date
-            ]
-        except Exception as exc:
-            football_data_rows = []
-            source_warning = "Football-Data alınamadı; manuel ve CSV kayıtları işlendi: " + str(exc)
-        fixtures, dropped = resolve_fixture_duplicates(football_data_rows + stored_rows)
+        source_warning = str(st.session_state.get(source_error_key) or "")
+        fresh_refresh_failed = bool(source_warning)
+        football_data_snapshot = list(st.session_state.get(snapshot_key) or [])
+        if not football_data_snapshot:
+            try:
+                football_data_snapshot = list(get_football_data_fixtures())
+                st.session_state[snapshot_key] = football_data_snapshot
+                st.session_state[snapshot_time_key] = datetime.now(
+                    ZoneInfo("Europe/Istanbul")
+                ).strftime("%d.%m.%Y %H:%M")
+                if not fresh_refresh_failed:
+                    st.session_state.pop(source_error_key, None)
+                    source_warning = ""
+            except Exception as exc:
+                source_warning = str(exc)
+                st.session_state[source_error_key] = source_warning
+        football_data_rows = [
+            dict(row) for row in football_data_snapshot
+            if str(row.get("match_date") or "") == requested_date
+        ]
+        uploaded_rows: list[dict[str, object]] = []
+        if uploaded_fixture_file is not None:
+            try:
+                uploaded_rows = [
+                    dict(row) for row in parse_uploaded_fixtures(uploaded_fixture_file.getvalue())
+                    if str(row.get("match_date") or "") == requested_date
+                ]
+            except Exception as exc:
+                st.error("CSV yedeği okunamadı.")
+                st.caption(str(exc))
+                return
+        fixtures, dropped = resolve_fixture_duplicates(
+            football_data_rows + stored_rows + uploaded_rows
+        )
         outcomes: list[dict[str, object]] = []
         league_cache: dict[str, list[dict[str, object]]] = {}
         progress = st.progress(0, text="Maçlar istatistiksel olarak değerlendiriliyor...")
@@ -1453,6 +1511,8 @@ def render_football_data_fixtures_page(client: Client) -> None:
             "outcomes": outcomes,
             "duplicate_count": len(dropped),
             "source_warning": source_warning,
+            "used_snapshot": bool(source_warning and football_data_rows),
+            "uploaded_count": len(uploaded_rows),
         }
 
     result = st.session_state.get(result_key)
@@ -1460,12 +1520,30 @@ def render_football_data_fixtures_page(client: Client) -> None:
         st.caption("Tarihi seçip analizi başlatın. Kayıtlı analizler otomatik yeniden hesaplanmaz.")
         return
     if result.get("source_warning"):
-        st.warning(str(result["source_warning"]))
+        if result.get("used_snapshot"):
+            snapshot_time = st.session_state.get(snapshot_time_key) or "zamanı bilinmiyor"
+            st.warning(
+                f"Football-Data erişilemedi; {snapshot_time} tarihli son başarılı fikstür kullanıldı. "
+                + str(result["source_warning"])
+            )
+        else:
+            st.warning(
+                "Football-Data erişilemedi; mevcut manuel/CSV kayıtları işlendi. "
+                + str(result["source_warning"])
+            )
+    if result.get("uploaded_count"):
+        st.info(f"CSV yedeğinden seçilen güne ait {result['uploaded_count']} maç okundu.")
     if result.get("duplicate_count"):
         st.info(
             f"{result['duplicate_count']} yinelenen maç tekilleştirildi. Manuel kayıt varsa manuel oranlar kullanıldı."
         )
     outcomes = list(result.get("outcomes") or [])
+    if not outcomes:
+        st.info(
+            "Seçilen gün için kullanılabilir maç bulunamadı. Football-Data yeniden erişilebilir "
+            "olduğunda kaynağı yenileyin veya yukarıdan fixtures.csv yükleyin."
+        )
+        return
     analyzable = [outcome for outcome in outcomes if outcome.get("report")]
     failed = [outcome for outcome in outcomes if not outcome.get("report")]
     metric_columns = st.columns(3)
