@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from io import BytesIO
 from datetime import datetime
+import time
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -66,12 +67,33 @@ def parse_fixtures_csv(content: bytes, now: datetime | None = None) -> list[dict
     return rows
 
 
-def fetch_current_fixtures() -> list[dict[str, Any]]:
-    request = Request(FIXTURES_URL, headers={"User-Agent": "Mozilla/5.0"})
-    try:
-        with urlopen(request, timeout=35) as response:
-            return parse_fixtures_csv(response.read())
-    except HTTPError as exc:
-        raise RuntimeError(f"Football-Data HTTP {exc.code}") from exc
-    except (URLError, TimeoutError) as exc:
-        raise RuntimeError(f"Football-Data bağlantı hatası: {exc}") from exc
+def parse_uploaded_fixtures(
+    content: bytes, now: datetime | None = None
+) -> list[dict[str, Any]]:
+    """Parse a user-provided fixtures.csv as a separate CSV fallback source."""
+    rows = parse_fixtures_csv(content, now=now)
+    for row in rows:
+        row["id"] = "upload-" + str(row["id"])
+        row["entry_method"] = "csv"
+    return rows
+
+
+def fetch_current_fixtures(
+    *, attempts: int = 3, retry_delay: float = 1.0
+) -> list[dict[str, Any]]:
+    """Fetch fixtures with short retries for transient upstream 5xx failures."""
+    if attempts < 1:
+        raise ValueError("attempts en az 1 olmalıdır")
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        request = Request(FIXTURES_URL, headers={"User-Agent": "Mozilla/5.0"})
+        try:
+            with urlopen(request, timeout=35) as response:
+                return parse_fixtures_csv(response.read())
+        except HTTPError as exc:
+            last_error = RuntimeError(f"Football-Data HTTP {exc.code}")
+        except (URLError, TimeoutError) as exc:
+            last_error = RuntimeError(f"Football-Data bağlantı hatası: {exc}")
+        if attempt < attempts and retry_delay > 0:
+            time.sleep(retry_delay * attempt)
+    raise last_error or RuntimeError("Football-Data fikstürü alınamadı.")
