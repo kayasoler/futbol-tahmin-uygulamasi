@@ -5,6 +5,8 @@ from urllib.error import URLError
 from zoneinfo import ZoneInfo
 
 from football_data_live import (
+    FIXTURES_FALLBACK_URL,
+    FIXTURES_URL,
     fetch_current_fixtures,
     parse_fixtures_csv,
     parse_uploaded_fixtures,
@@ -40,6 +42,13 @@ class LiveSourceTests(unittest.TestCase):
         self.assertEqual(rows[0]["entry_method"], "csv")
         self.assertTrue(rows[0]["id"].startswith("upload-fd-"))
 
+    def test_working_hostname_is_primary_and_www_is_fallback(self):
+        self.assertEqual(FIXTURES_URL, "https://football-data.co.uk/fixtures.csv")
+        self.assertEqual(
+            FIXTURES_FALLBACK_URL,
+            "https://www.football-data.co.uk/fixtures.csv",
+        )
+
     @patch("football_data_live.time.sleep")
     @patch("football_data_live.urlopen")
     def test_retries_transient_source_failure(self, urlopen, sleep):
@@ -60,7 +69,21 @@ class LiveSourceTests(unittest.TestCase):
     def test_reports_failure_after_all_retries(self, urlopen, sleep):
         with self.assertRaisesRegex(RuntimeError, "Football-Data bağlantı hatası"):
             fetch_current_fixtures(attempts=3, retry_delay=0)
-        self.assertEqual(urlopen.call_count, 3)
+        self.assertEqual(urlopen.call_count, 6)
+
+    @patch("football_data_live.urlopen")
+    def test_uses_www_only_after_primary_hostname_fails(self, urlopen):
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = (
+            b"Div,Date,Time,HomeTeam,AwayTeam,B365H,B365D,B365A\nE0,09/09/2026,20:00,A,B,1.70,3.80,5.20\n"
+        )
+        urlopen.side_effect = [URLError("primary offline"), response]
+
+        rows = fetch_current_fixtures(attempts=1, retry_delay=0)
+
+        self.assertEqual(len(rows), 1)
+        called_urls = [call.args[0].full_url for call in urlopen.call_args_list]
+        self.assertEqual(called_urls, [FIXTURES_URL, FIXTURES_FALLBACK_URL])
 
     def test_matches_highlightly_teams(self):
         match = find_match({"data": [{"id": 1, "homeTeam": {"name": "West Ham United"}, "awayTeam": {"name": "Wolverhampton Wanderers"}}]}, "West Ham", "Wolverhampton")
