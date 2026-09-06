@@ -25,10 +25,10 @@ Onemli:
 - IY/MS secili macin takim formlarindan hesaplanir ve 1/X/2 olarak gosterilir.
 - Arayuz her veri kaynaginin tahmine yuzde kac agirlikla katildigini ve veri uyarilarini gosterir.
 - Streamlit Secrets icinde GEMINI_API_KEY ve TAVILY_API_KEY varsa Gemini haberleri tum istatistiklerle birlestirip kendi tahminini ve kupon yorumunu uretir.
-- Aşama 20 ile API_FOOTBALL_KEY eklenirse tarih bazında dünya fikstürü, ülke/lig filtresi ve seçilen maçtan analiz başlatma ekranı açılır.
+- API_FOOTBALL_KEY eklenirse Dünya Fikstürü API-Football'ı birincil kaynak olarak kullanır; hata veya kota durumunda Football-Data, son başarılı kayıt, CSV ve manuel girişler çalışmaya devam eder.
 - API-Football anahtarı GitHub dosyalarına yazılmaz; Streamlit Secrets içinde tutulur.
-- Birden fazla anahtar için API_FOOTBALL_KEYS = ["anahtar1", "anahtar2", "anahtar3"] kullanılabilir; kota veya anahtar hatasında sıradaki anahtar denenir.
-- Seçilen maçın Bet365 oranı yalnızca kullanıcı istediğinde API'den alınır ve 30 dakika önbellekte tutulur.
+- Birden fazla anahtar için API_FOOTBALL_KEYS = ["anahtar1", "anahtar2"] kullanılabilir; ilk anahtar bağlantı/zaman aşımı, geçersiz yanıt, 401/403, kota veya geçici 5xx hatası verirse sıradaki anahtar otomatik denenir.
+- Seçilen günün API-Football Bet365 oranları 30 dakika önbellekte tutulur; oran bulunamazsa eşleşen Football-Data oranı yedek olarak kullanılır, manuel oranlar her zaman önceliklidir.
 - Yaklaşık açılış oranı isteğe bağlıdır; boş bırakılırsa güncel oranla analiz devam eder.
 - Manuel açılış alanları 1-X-2 ile birlikte Bet365 2.5 Üst/Alt oranlarını da kabul eder ve iki piyasanın hareketini marjdan arındırarak gösterir.
 - Geçmiş oranlar birebir eşitlik yerine marjı temizlenmiş ±1,5 / ±3 / ±5 puan olasılık toleransıyla karşılaştırılır.
@@ -45,5 +45,6 @@ Onemli:
 - Mobil analiz ekranında model, Gemini ve oran hareketi önce tek bir nihai özet kartında karşılaştırılır; uzun H2H, benzer oran, model bileşenleri ve Gemini raporu kapalı ayrıntılarda tutulur.
 - Benzer piyasa özetleri tüm uygun örneklemi kullanır, mobil ayrıntı tablosunda yalnızca olasılık profili en yakın 20 maç gösterilir.
 - Nihai mobil özet; MS 1-X-2, İY/MS, ana ve alternatif skorlar, KG ile 2.5 Alt/Üst seçeneklerini karşı ihtimalleri ve yüzdeleriyle birlikte gösterir.
-- API fikstüründe yalnızca Supabase içinde tarihsel lig kodu bulunan maçlar gösterilir; desteklenmeyen ligler için ayrıntı alınmaz ve analiz yapılmaz.
+- API fikstüründeki tüm maçlar kaynakta kalır; Supabase içinde tarihsel lig kodu bulunmayanlar ayrı "Analiz edilemeyenler" bölümünde gösterilir.
 - API takım adları tarihsel CSV takım adlarıyla güvenilir biçimde eşleşmezse analiz güvenlik amacıyla durdurulur.
+- Eksik maç sonuçlarında API-Football birincil, TheSportsDB yedek kaynaktır; yalnızca kesin FT/AET/PEN durumları kaydedilir.

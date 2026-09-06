@@ -16,15 +16,25 @@ from analysis import (
     odds_summary_table,
 )
 from analysis_store import load_latest_analysis, restore_report_snapshot, save_analysis_version
+from league_mapping import division_for_api_league, match_team_name
 
 
 ANALYZABLE_FIXTURE_STATUSES = {"", "NS", "TBD"}
 SOURCE_LABELS = {
+    "api-football": "API-Football",
     "football-data-live": "Football-Data",
     "manual": "Manuel",
     "csv": "CSV",
 }
-SOURCE_PRIORITY = {"manual": 30, "football-data-live": 20, "csv": 10}
+SOURCE_PRIORITY = {
+    "manual": 40,
+    "api-football": 30,
+    "football-data-live": 20,
+    "csv": 10,
+}
+ODDS_FIELDS = (
+    "b365_home", "b365_draw", "b365_away", "b365_over_25", "b365_under_25",
+)
 
 
 def source_key(fixture: dict[str, Any]) -> str:
@@ -40,11 +50,46 @@ def _identity_text(value: Any) -> str:
 
 def fixture_identity(fixture: dict[str, Any]) -> tuple[str, str, str, str]:
     return (
-        _identity_text(fixture.get("division")),
+        _identity_text(
+            fixture.get("division") or fixture.get("league_id") or fixture.get("league")
+        ),
         str(fixture.get("match_date") or ""),
         _identity_text(fixture.get("home_team")),
         _identity_text(fixture.get("away_team")),
     )
+
+
+def _valid_odd(value: Any) -> bool:
+    try:
+        return float(value) > 1
+    except (TypeError, ValueError):
+        return False
+
+
+def _fill_missing_odds(
+    primary: dict[str, Any], fallback: dict[str, Any]
+) -> dict[str, Any]:
+    """Keep the chosen source while filling only absent odds from its fallback."""
+    result = dict(primary)
+    if source_key(result) == "manual":
+        return result
+    had_primary_odds = any(_valid_odd(result.get(field)) for field in ODDS_FIELDS)
+    filled = [
+        field
+        for field in ODDS_FIELDS
+        if not _valid_odd(result.get(field)) and _valid_odd(fallback.get(field))
+    ]
+    for field in filled:
+        result[field] = fallback[field]
+    if filled:
+        fallback_label = f"{SOURCE_LABELS[source_key(fallback)]} yedek oranı"
+        primary_label = str(result.get("analysis_odds_source") or "").strip()
+        result["analysis_odds_source"] = (
+            f"{primary_label} + {fallback_label}"
+            if had_primary_odds and primary_label
+            else fallback_label
+        )
+    return result
 
 
 def resolve_fixture_duplicates(
@@ -62,9 +107,10 @@ def resolve_fixture_duplicates(
             continue
         if SOURCE_PRIORITY[source_key(fixture)] > SOURCE_PRIORITY[source_key(current)]:
             dropped.append(current)
-            winners[identity] = fixture
+            winners[identity] = _fill_missing_odds(fixture, current)
         else:
             dropped.append(fixture)
+            winners[identity] = _fill_missing_odds(current, fixture)
     ordered = sorted(
         winners.values(),
         key=lambda row: (
@@ -74,6 +120,53 @@ def resolve_fixture_duplicates(
         ),
     )
     return ordered, dropped
+
+
+def prepare_api_fixture_for_analysis(
+    fixture: dict[str, Any],
+    available_divisions: set[str],
+    league_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Map an API-Football fixture to the existing historical league/team vocabulary."""
+    prepared = dict(fixture)
+    prepared["entry_method"] = "api-football"
+    prepared["match_status"] = str(
+        prepared.get("match_status") or prepared.get("status") or "NS"
+    ).upper()
+    division = division_for_api_league(prepared.get("league_id"), available_divisions)
+    prepared["division"] = division or ""
+    prepared["analysis_odds_source"] = (
+        "API-Football Bet365 oranı"
+        if all(_valid_odd(prepared.get(field)) for field in ODDS_FIELDS[:3])
+        else "API-Football fikstürü (oran bulunamadı)"
+    )
+    if not division or not league_rows:
+        return prepared
+
+    historical_names = sorted(
+        {
+            str(row.get(column)).strip()
+            for row in league_rows
+            for column in ("home_team", "away_team")
+            if row.get(column)
+        },
+        key=str.casefold,
+    )
+    api_home = str(prepared.get("home_team") or "")
+    api_away = str(prepared.get("away_team") or "")
+    home_name, home_score = match_team_name(api_home, historical_names)
+    away_name, away_score = match_team_name(api_away, historical_names)
+    prepared["api_home_team"] = api_home
+    prepared["api_away_team"] = api_away
+    prepared["team_match_confidence"] = {
+        "home": home_score,
+        "away": away_score,
+    }
+    if home_name:
+        prepared["home_team"] = home_name
+    if away_name:
+        prepared["away_team"] = away_name
+    return prepared
 
 
 def normalize_upcoming_fixture(row: dict[str, Any]) -> dict[str, Any]:

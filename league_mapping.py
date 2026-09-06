@@ -27,6 +27,18 @@ API_LEAGUE_TO_DIVISION = {
     203: "T1",  # Turkey Super Lig
 }
 
+TEAM_NAME_ALIASES = {
+    "manchester united": "man united",
+    "manchester city": "man city",
+    "wolverhampton wanderers": "wolves",
+    "nottingham forest": "nottm forest",
+    "nott m forest": "nottm forest",
+    "paris saint germain": "paris sg",
+    "athletic bilbao": "ath bilbao",
+    "atletico madrid": "ath madrid",
+    "borussia monchengladbach": "mgladbach",
+}
+
 
 def division_for_api_league(league_id: object, available_divisions: set[str]) -> str | None:
     try:
@@ -36,18 +48,19 @@ def division_for_api_league(league_id: object, available_divisions: set[str]) ->
     return division if division in available_divisions else None
 
 
-def _name_key(value: str) -> str:
+def team_name_key(value: str) -> str:
     plain = unicodedata.normalize("NFKD", str(value)).encode("ascii", "ignore").decode()
     words = re.findall(r"[a-z0-9]+", plain.casefold())
     ignored = {"fc", "cf", "afc", "ac", "sc", "fk", "club", "calcio"}
-    return " ".join(word for word in words if word not in ignored)
+    key = " ".join(word for word in words if word not in ignored)
+    return TEAM_NAME_ALIASES.get(key, key)
 
 
 def match_team_name(api_name: str, historical_names: list[str]) -> tuple[str | None, float]:
-    target = _name_key(api_name)
+    target = team_name_key(api_name)
     if not target:
         return None, 0.0
-    keyed = [(name, _name_key(name)) for name in historical_names]
+    keyed = [(name, team_name_key(name)) for name in historical_names]
     exact = next((name for name, key in keyed if key == target), None)
     if exact:
         return exact, 1.0
@@ -59,6 +72,31 @@ def match_team_name(api_name: str, historical_names: list[str]) -> tuple[str | N
         score = SequenceMatcher(None, target, key).ratio()
         if target in key or key in target:
             score = max(score, min(len(target), len(key)) / max(len(target), len(key)))
+        target_words = target.split()
+        key_words = key.split()
+        shorter, longer = (
+            (target_words, key_words)
+            if len(target_words) <= len(key_words)
+            else (key_words, target_words)
+        )
+        aliases = {
+            frozenset({"man", "manchester"}),
+            frozenset({"utd", "united"}),
+            frozenset({"st", "saint"}),
+        }
+        if shorter and all(
+            any(
+                word == candidate
+                or frozenset({word, candidate}) in aliases
+                or (
+                    min(len(word), len(candidate)) >= 4
+                    and word[:4] == candidate[:4]
+                )
+                for candidate in longer
+            )
+            for word in shorter
+        ):
+            score = max(score, 0.9)
         if score > best_score:
             best_name = name
             best_score = score
