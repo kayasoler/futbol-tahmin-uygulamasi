@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import json
 from datetime import date
+from difflib import SequenceMatcher
 from typing import Any, Iterable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from league_mapping import team_name_key
+
 
 BASE_URL = "https://v3.football.api-sports.io"
+FINAL_FIXTURE_STATUSES = {"FT", "AET", "PEN"}
 
 
 def normalize_api_keys(value: str | Iterable[str]) -> list[str]:
@@ -59,7 +63,11 @@ def _get(api_keys: str | Iterable[str], endpoint: str, params: dict[str, Any]) -
             if any(word in lowered for word in ("limit", "quota", "key", "request")):
                 continue
             raise RuntimeError(f"API-Football hata yanıtı: {errors}")
-        return {"response": payload.get("response") or [], "quota": headers}
+        return {
+            "response": payload.get("response") or [],
+            "quota": headers,
+            "paging": payload.get("paging") or {},
+        }
     raise RuntimeError("API-Football anahtarlarının hiçbiri kullanılamadı. " + " | ".join(failures))
 
 
@@ -75,6 +83,7 @@ def normalize_fixture(item: dict[str, Any]) -> dict[str, Any]:
     match_date = kickoff[:10] if len(kickoff) >= 10 else ""
     kickoff_time = kickoff[11:19] if len(kickoff) >= 19 else None
     return {
+        "id": f"api-{fixture.get('id')}",
         "api_fixture_id": fixture.get("id"),
         "match_date": match_date,
         "kickoff_time": kickoff_time,
@@ -95,6 +104,8 @@ def normalize_fixture(item: dict[str, Any]) -> dict[str, Any]:
         "away_logo": away.get("logo"),
         "venue": venue.get("name"),
         "city": venue.get("city"),
+        "entry_method": "api-football",
+        "match_status": status.get("short") or status.get("long") or "NS",
         "raw_data": item,
     }
 
@@ -155,3 +166,146 @@ def normalize_bet365_odds(response: list[dict[str, Any]]) -> dict[str, Any] | No
 def fetch_bet365_odds(api_keys: str | Iterable[str], fixture_id: int | str) -> dict[str, Any]:
     result = _get(api_keys, "odds", {"fixture": fixture_id, "bookmaker": 8})
     return {"odds": normalize_bet365_odds(result["response"]), "quota": result["quota"]}
+
+
+def normalize_bet365_odds_by_fixture(
+    response: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Index a date-level odds response by API fixture id."""
+    indexed: dict[str, dict[str, Any]] = {}
+    for fixture_item in response:
+        fixture_id = (fixture_item.get("fixture") or {}).get("id")
+        odds = normalize_bet365_odds([fixture_item])
+        if fixture_id is not None and odds:
+            indexed[str(fixture_id)] = odds
+    return indexed
+
+
+def fetch_bet365_odds_for_date(
+    api_keys: str | Iterable[str],
+    fixture_date: date | str,
+    timezone: str = "Europe/Istanbul",
+    *,
+    max_pages: int = 10,
+) -> dict[str, Any]:
+    """Fetch Bet365 1-X-2 odds in bounded pages for one selected day."""
+    odds_by_fixture: dict[str, dict[str, Any]] = {}
+    quota: dict[str, Any] = {}
+    page = 1
+    while page <= max(1, int(max_pages)):
+        result = _get(
+            api_keys,
+            "odds",
+            {
+                "date": str(fixture_date),
+                "timezone": timezone,
+                "bookmaker": 8,
+                "page": page,
+            },
+        )
+        odds_by_fixture.update(normalize_bet365_odds_by_fixture(result["response"]))
+        quota = result["quota"]
+        paging = result.get("paging") or {}
+        try:
+            total_pages = max(1, int(paging.get("total") or 1))
+        except (TypeError, ValueError):
+            total_pages = 1
+        if page >= total_pages:
+            break
+        page += 1
+    return {"odds_by_fixture": odds_by_fixture, "quota": quota, "pages": page}
+
+
+def normalize_final_result(item: dict[str, Any]) -> dict[str, Any] | None:
+    """Return regular-time scores only for explicitly completed fixtures."""
+    fixture = item.get("fixture") or {}
+    status = fixture.get("status") or {}
+    status_short = str(status.get("short") or "").strip().upper()
+    if status_short not in FINAL_FIXTURE_STATUSES:
+        return None
+    score = item.get("score") or {}
+    full_time = score.get("fulltime") or {}
+    half_time = score.get("halftime") or {}
+    goals = item.get("goals") or {}
+    home_value = full_time.get("home")
+    away_value = full_time.get("away")
+    if status_short == "FT":
+        home_value = goals.get("home") if home_value is None else home_value
+        away_value = goals.get("away") if away_value is None else away_value
+    try:
+        full_home = int(home_value)
+        full_away = int(away_value)
+    except (TypeError, ValueError):
+        return None
+
+    def optional_score(value: Any) -> int | None:
+        try:
+            return None if value is None else int(value)
+        except (TypeError, ValueError):
+            return None
+
+    teams = item.get("teams") or {}
+    return {
+        "match_date": str(fixture.get("date") or "")[:10],
+        "home_team": str((teams.get("home") or {}).get("name") or ""),
+        "away_team": str((teams.get("away") or {}).get("name") or ""),
+        "full_time_home": full_home,
+        "full_time_away": full_away,
+        "half_time_home": optional_score(half_time.get("home")),
+        "half_time_away": optional_score(half_time.get("away")),
+        "source": "api-football",
+        "api_fixture_id": fixture.get("id"),
+        "status": status_short,
+    }
+
+
+def fetch_final_results_for_date(
+    api_keys: str | Iterable[str],
+    fixture_date: date | str,
+    timezone: str = "Europe/Istanbul",
+) -> dict[str, Any]:
+    result = _get(
+        api_keys,
+        "fixtures",
+        {"date": str(fixture_date), "timezone": timezone},
+    )
+    return {
+        "results": [
+            parsed
+            for item in result["response"]
+            if (parsed := normalize_final_result(item)) is not None
+        ],
+        "quota": result["quota"],
+    }
+
+
+def _normalized_team(value: Any) -> str:
+    return team_name_key(str(value or ""))
+
+
+def _team_score(left: Any, right: Any) -> float:
+    left_key = _normalized_team(left)
+    right_key = _normalized_team(right)
+    if not left_key or not right_key:
+        return 0.0
+    score = SequenceMatcher(None, left_key, right_key).ratio()
+    if left_key in right_key or right_key in left_key:
+        score = max(score, min(len(left_key), len(right_key)) / max(len(left_key), len(right_key)))
+    return score
+
+
+def match_final_result(
+    results: list[dict[str, Any]], match: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Match a completed API fixture to one stored analysis without trusting date alone."""
+    expected_date = str(match.get("match_date") or "")
+    candidates: list[tuple[float, dict[str, Any]]] = []
+    for result in results:
+        if str(result.get("match_date") or "") != expected_date:
+            continue
+        home_score = _team_score(match.get("home_team"), result.get("home_team"))
+        away_score = _team_score(match.get("away_team"), result.get("away_team"))
+        if min(home_score, away_score) < 0.72:
+            continue
+        candidates.append((home_score + away_score, result))
+    return dict(max(candidates, key=lambda item: item[0])[1]) if candidates else None

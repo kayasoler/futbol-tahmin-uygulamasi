@@ -45,6 +45,17 @@ class AnalysisStoreTests(unittest.TestCase):
         self.assertEqual(snapshot["csv_b365_home"], 1.82)
         self.assertEqual(snapshot["entry_method"], "manual")
 
+    def test_snapshot_keeps_api_football_traceability(self):
+        snapshot = match_snapshot({
+            "entry_method": "api-football",
+            "api_fixture_id": 42,
+            "league_id": 39,
+            "league": "Premier League",
+            "country": "England",
+        })
+        self.assertEqual(snapshot["api_fixture_id"], 42)
+        self.assertEqual(snapshot["league_id"], 39)
+
     def test_evaluates_stored_prediction_against_score(self):
         analysis = {"report_snapshot": {"predictions": {
             "ms": "MS 1", "score": "2-1", "btts_prediction": "KG Var",

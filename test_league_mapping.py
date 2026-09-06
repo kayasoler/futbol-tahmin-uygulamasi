@@ -13,6 +13,20 @@ class LeagueMappingTests(unittest.TestCase):
         self.assertEqual(name, "Arsenal")
         self.assertEqual(score, 1.0)
 
+    def test_matches_common_manchester_abbreviation(self):
+        name, score = match_team_name(
+            "Manchester United FC", ["Man United", "Man City", "Chelsea"]
+        )
+        self.assertEqual(name, "Man United")
+        self.assertGreaterEqual(score, 0.9)
+
+    def test_matches_known_data_provider_alias(self):
+        name, score = match_team_name(
+            "Wolverhampton Wanderers", ["Wolves", "West Ham", "Chelsea"]
+        )
+        self.assertEqual(name, "Wolves")
+        self.assertEqual(score, 1.0)
+
     def test_rejects_unrelated_team(self):
         name, _ = match_team_name("Unknown Athletic", ["Arsenal", "Chelsea"])
         self.assertIsNone(name)

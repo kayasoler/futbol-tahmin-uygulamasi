@@ -58,7 +58,7 @@ def match_snapshot(match: dict[str, Any]) -> dict[str, Any]:
         "opening_b365_over_25", "opening_b365_under_25",
         "csv_b365_home", "csv_b365_draw", "csv_b365_away",
         "csv_b365_over_25", "csv_b365_under_25", "analysis_odds_source",
-        "entry_method", "match_status",
+        "entry_method", "match_status", "api_fixture_id", "league_id", "league", "country",
     )
     return json_safe({key: match.get(key) for key in keys})
 

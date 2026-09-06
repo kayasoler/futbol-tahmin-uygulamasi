@@ -5,6 +5,7 @@ from daily_fixture_analysis import (
     analyze_daily_fixture,
     fixture_table_row,
     normalize_upcoming_fixture,
+    prepare_api_fixture_for_analysis,
     prepare_fixture_match,
     resolve_fixture_duplicates,
 )
@@ -25,6 +26,42 @@ class DailyFixtureAnalysisTests(unittest.TestCase):
         self.assertEqual(winners[0]["entry_method"], "manual")
         self.assertEqual(winners[0]["b365_home"], 1.65)
         self.assertEqual(dropped[0]["entry_method"], "football-data-live")
+
+    def test_api_football_wins_and_uses_football_data_fallback_odds(self):
+        common = {
+            "division": "E0", "match_date": "2026-09-06",
+            "home_team": "Arsenal", "away_team": "Chelsea",
+        }
+        api = dict(common, id="api-1", entry_method="api-football")
+        fallback = dict(
+            common,
+            id="fd-1",
+            entry_method="football-data-live",
+            b365_home=1.80,
+            b365_draw=3.50,
+            b365_away=4.20,
+        )
+        winners, dropped = resolve_fixture_duplicates([fallback, api])
+        self.assertEqual(winners[0]["entry_method"], "api-football")
+        self.assertEqual(winners[0]["b365_home"], 1.80)
+        self.assertEqual(winners[0]["analysis_odds_source"], "Football-Data yedek oranı")
+        self.assertEqual(dropped[0]["entry_method"], "football-data-live")
+
+    def test_prepares_api_fixture_with_historical_team_names(self):
+        prepared = prepare_api_fixture_for_analysis(
+            {
+                "league_id": 39,
+                "home_team": "Manchester United FC",
+                "away_team": "Chelsea FC",
+                "status": "NS",
+            },
+            {"E0"},
+            [{"home_team": "Man United", "away_team": "Chelsea"}],
+        )
+        self.assertEqual(prepared["division"], "E0")
+        self.assertEqual(prepared["home_team"], "Man United")
+        self.assertEqual(prepared["away_team"], "Chelsea")
+        self.assertEqual(prepared["entry_method"], "api-football")
 
     def test_sources_remain_separate_when_matches_are_different(self):
         fixtures = [
