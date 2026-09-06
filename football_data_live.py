@@ -11,7 +11,9 @@ import pandas as pd
 from zoneinfo import ZoneInfo
 
 
-FIXTURES_URL = "https://www.football-data.co.uk/fixtures.csv"
+FIXTURES_URL = "https://football-data.co.uk/fixtures.csv"
+FIXTURES_FALLBACK_URL = "https://www.football-data.co.uk/fixtures.csv"
+FIXTURES_URLS = (FIXTURES_URL, FIXTURES_FALLBACK_URL)
 
 
 def parse_fixtures_csv(content: bytes, now: datetime | None = None) -> list[dict[str, Any]]:
@@ -79,21 +81,25 @@ def parse_uploaded_fixtures(
 
 
 def fetch_current_fixtures(
-    *, attempts: int = 3, retry_delay: float = 1.0
+    *, attempts: int = 3, retry_delay: float = 1.0,
+    urls: tuple[str, ...] = FIXTURES_URLS,
 ) -> list[dict[str, Any]]:
-    """Fetch fixtures with short retries for transient upstream 5xx failures."""
+    """Fetch fixtures from the working hostname, then try the legacy hostname."""
     if attempts < 1:
         raise ValueError("attempts en az 1 olmalıdır")
+    if not urls:
+        raise ValueError("en az bir Football-Data adresi gereklidir")
     last_error: Exception | None = None
-    for attempt in range(1, attempts + 1):
-        request = Request(FIXTURES_URL, headers={"User-Agent": "Mozilla/5.0"})
-        try:
-            with urlopen(request, timeout=35) as response:
-                return parse_fixtures_csv(response.read())
-        except HTTPError as exc:
-            last_error = RuntimeError(f"Football-Data HTTP {exc.code}")
-        except (URLError, TimeoutError) as exc:
-            last_error = RuntimeError(f"Football-Data bağlantı hatası: {exc}")
-        if attempt < attempts and retry_delay > 0:
-            time.sleep(retry_delay * attempt)
+    for url in urls:
+        for attempt in range(1, attempts + 1):
+            request = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            try:
+                with urlopen(request, timeout=35) as response:
+                    return parse_fixtures_csv(response.read())
+            except HTTPError as exc:
+                last_error = RuntimeError(f"Football-Data HTTP {exc.code}")
+            except (URLError, TimeoutError) as exc:
+                last_error = RuntimeError(f"Football-Data bağlantı hatası: {exc}")
+            if attempt < attempts and retry_delay > 0:
+                time.sleep(retry_delay * attempt)
     raise last_error or RuntimeError("Football-Data fikstürü alınamadı.")
