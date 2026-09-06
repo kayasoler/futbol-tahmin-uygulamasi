@@ -4,13 +4,18 @@ from unittest.mock import patch
 from urllib.error import HTTPError, URLError
 
 from api_football import (
+    fetch_match_context,
+    fetch_match_reference,
     fetch_bet365_odds_for_date,
+    match_fixture,
     match_final_result,
     normalize_api_keys,
     normalize_bet365_odds,
     normalize_bet365_odds_by_fixture,
     normalize_final_result,
     normalize_fixture,
+    normalize_injuries,
+    normalize_lineups,
 )
 
 
@@ -95,6 +100,58 @@ class ApiFootballTests(unittest.TestCase):
         self.assertEqual(row["away_team"], "Away FC")
         self.assertEqual(row["entry_method"], "api-football")
         self.assertEqual(row["match_status"], "NS")
+
+    def test_matches_selected_fixture_with_provider_suffixes(self):
+        match = match_fixture(
+            [{"home_team": "Arsenal FC", "away_team": "Chelsea FC", "api_fixture_id": 42}],
+            "Arsenal",
+            "Chelsea",
+        )
+        self.assertEqual(match["api_fixture_id"], 42)
+
+    def test_normalizes_player_status_and_lineups(self):
+        injuries = normalize_injuries([{
+            "team": {"name": "Arsenal"},
+            "player": {"name": "Test Player", "type": "Missing Fixture", "reason": "Injury"},
+        }])
+        lineups = normalize_lineups([{
+            "team": {"id": 1, "name": "Arsenal"}, "formation": "4-3-3",
+            "startXI": [{"player": {"name": "Starter"}}],
+            "substitutes": [{"player": {"name": "Sub"}}],
+        }])
+        self.assertEqual(injuries[0]["Oyuncu"], "Test Player")
+        self.assertEqual(lineups[0]["starting"], ["Starter"])
+
+    @patch("api_football._get")
+    def test_fetches_context_only_for_selected_match(self, api_get):
+        api_get.side_effect = [
+            {"response": [{
+                "fixture": {"id": 42, "date": "2026-09-06T20:00:00+03:00", "status": {"short": "NS"}},
+                "league": {"name": "Premier League"},
+                "teams": {"home": {"id": 1, "name": "Arsenal FC"}, "away": {"id": 2, "name": "Chelsea FC"}},
+            }], "quota": {}, "paging": {}},
+            {"response": [], "quota": {}, "paging": {}},
+            {"response": [], "quota": {}, "paging": {}},
+            {"response": [], "quota": {}, "paging": {}},
+        ]
+        context = fetch_match_context(("key",), "2026-09-06", "Arsenal", "Chelsea")
+        self.assertEqual(context["match"]["api_fixture_id"], 42)
+        self.assertEqual(api_get.call_count, 4)
+
+    @patch("api_football._get")
+    def test_lineup_reference_uses_only_one_fixture_request(self, api_get):
+        api_get.return_value = {
+            "response": [{
+                "fixture": {"id": 42, "date": "2026-09-06T20:00:00+03:00", "status": {"short": "NS"}},
+                "league": {"name": "Premier League"},
+                "teams": {"home": {"id": 1, "name": "Arsenal FC"}, "away": {"id": 2, "name": "Chelsea FC"}},
+            }],
+            "quota": {},
+            "paging": {},
+        }
+        reference = fetch_match_reference(("key",), "2026-09-06", "Arsenal", "Chelsea")
+        self.assertEqual(reference["match"]["api_fixture_id"], 42)
+        api_get.assert_called_once()
 
     def test_extracts_bet365_match_winner(self):
         odds = normalize_bet365_odds([{

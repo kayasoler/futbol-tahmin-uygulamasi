@@ -28,9 +28,9 @@ SOURCE_LABELS = {
 }
 SOURCE_PRIORITY = {
     "manual": 40,
-    "api-football": 30,
+    "csv": 30,
     "football-data-live": 20,
-    "csv": 10,
+    "api-football": 10,
 }
 ODDS_FIELDS = (
     "b365_home", "b365_draw", "b365_away", "b365_over_25", "b365_under_25",
@@ -95,7 +95,7 @@ def _fill_missing_odds(
 def resolve_fixture_duplicates(
     fixtures: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Keep one source per match; manual entries always win source conflicts."""
+    """Prefer manual input, then an explicit CSV upload, then live fixtures."""
     winners: dict[tuple[str, str, str, str], dict[str, Any]] = {}
     dropped: list[dict[str, Any]] = []
     for original in fixtures:
