@@ -31,7 +31,9 @@ def json_safe(value: Any) -> Any:
 
 def compact_report(report: dict[str, Any]) -> dict[str, Any]:
     """Keep durable outputs and bounded display evidence for immutable rendering."""
-    keys = ("predictions", "components", "warnings", "comment", "coupon", "evidence")
+    keys = (
+        "model_revision", "predictions", "components", "warnings", "comment", "coupon", "evidence",
+    )
     snapshot = {key: report.get(key) for key in keys}
     snapshot["snapshot_version"] = 2
     return json_safe(snapshot)
@@ -155,7 +157,13 @@ def load_analysis_history(client, limit: int = 300) -> tuple[list[dict[str, Any]
 
 def load_match_results(client, limit: int = 500) -> tuple[dict[str, dict[str, Any]], str | None]:
     try:
-        response = client.table("match_results").select("*").limit(limit).execute()
+        response = (
+            client.table("match_results")
+            .select("*")
+            .order("match_date", desc=True)
+            .limit(limit)
+            .execute()
+        )
         rows = [dict(row) for row in (response.data or [])]
         return {str(row["match_key"]): row for row in rows}, None
     except Exception as exc:

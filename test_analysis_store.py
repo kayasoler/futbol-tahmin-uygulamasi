@@ -18,11 +18,13 @@ class AnalysisStoreTests(unittest.TestCase):
 
     def test_compact_report_excludes_historical_rows(self):
         compact = compact_report({
+            "model_revision": "stat-v1",
             "predictions": {"ms": "1"},
             "evidence": {"h2h_rows": [{"bounded": "row"}]},
             "h2h": [{"large": "row"}],
         })
         self.assertEqual(compact["predictions"]["ms"], "1")
+        self.assertEqual(compact["model_revision"], "stat-v1")
         self.assertEqual(compact["snapshot_version"], 2)
         self.assertEqual(compact["evidence"]["h2h_rows"][0]["bounded"], "row")
         self.assertNotIn("h2h", compact)

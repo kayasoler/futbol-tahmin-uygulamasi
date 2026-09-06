@@ -14,6 +14,9 @@ from urllib.request import Request, urlopen
 import pandas as pd
 
 
+MODEL_REVISION = "stat-v1"
+
+
 HISTORICAL_COLUMNS = (
     "match_date,division,home_team,away_team,full_time_home_goals,"
     "full_time_away_goals,full_time_result,half_time_result,"
@@ -1582,6 +1585,7 @@ def build_report(
     )
 
     return {
+        "model_revision": MODEL_REVISION,
         "h2h": h2h_rows,
         "same_odds": same_odds_rows,
         "predictions": {

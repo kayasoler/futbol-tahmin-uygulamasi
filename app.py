@@ -55,6 +55,12 @@ from highlightly import (
     selected_standings,
 )
 from league_mapping import division_for_api_league, match_team_name
+from performance import (
+    build_performance_events,
+    grouped_summary,
+    select_pre_match_analyses,
+    summarize_events,
+)
 from results_api import fetch_match_result
 from supabase_resilience import fetch_team_catalog_with_retry
 from data_import import (
@@ -1786,13 +1792,145 @@ def render_world_fixtures_page(client: Client) -> None:
     render_match_analysis(client, analysis_match)
 
 
+def _performance_table(rows: list[dict[str, object]], label_field: str) -> pd.DataFrame:
+    labels = {
+        "confidence": "Güven",
+        "market": "Pazar",
+        "division": "Lig",
+    }
+    output: list[dict[str, object]] = []
+    for row in rows:
+        accuracy = row.get("accuracy")
+        brier = row.get("brier")
+        log_loss = row.get("log_loss")
+        roi = row.get("roi")
+        output.append({
+            labels[label_field]: row.get(label_field),
+            "Maç": row.get("match_count"),
+            "Doğruluk": f"%{float(accuracy) * 100:.1f}" if accuracy is not None else "—",
+            "Brier": f"{float(brier):.3f}" if brier is not None else "—",
+            "Log-loss": f"{float(log_loss):.3f}" if log_loss is not None else "—",
+            "ROI": f"%{float(roi) * 100:+.1f}" if roi is not None else "—",
+            "Oranlı tahmin": row.get("roi_count"),
+            "Durum": row.get("sample_status"),
+        })
+    return pd.DataFrame(output)
+
+
+def render_live_performance_panel(
+    analyses: list[dict[str, object]], results: dict[str, dict[str, object]]
+) -> None:
+    st.markdown("### 📊 Canlı Performans")
+    st.caption(
+        "Yalnızca maç başlamadan önce oluşturulan son analiz sürümü kullanılır. "
+        "Brier ve log-loss değerlerinde düşük sonuç daha iyidir."
+    )
+    pre_match, timing_stats = select_pre_match_analyses(analyses)
+    all_events = build_performance_events(pre_match, results)
+
+    filter_columns = st.columns(2)
+    period = filter_columns[0].selectbox(
+        "Tarih aralığı", ("Son 90 gün", "Son 30 gün", "Tüm zamanlar"),
+        key="performance_period",
+    )
+    divisions = sorted({str(row.get("division") or "Bilinmeyen") for row in all_events})
+    selected_division = filter_columns[1].selectbox(
+        "Lig", ("Tüm ligler", *divisions), key="performance_division",
+    )
+    detail_columns = st.columns(2)
+    revisions = sorted({str(row.get("model_revision") or "Legacy") for row in all_events})
+    selected_revision = detail_columns[0].selectbox(
+        "Model sürümü", ("Tüm sürümler", *revisions), key="performance_revision",
+    )
+    selected_confidence = detail_columns[1].selectbox(
+        "Güven seviyesi", ("Tümü", "Yüksek", "Orta", "Düşük", "Bilinmeyen"),
+        key="performance_confidence",
+    )
+
+    day_limit = {"Son 90 gün": 90, "Son 30 gün": 30}.get(period)
+    cutoff = datetime.now(ZoneInfo("Europe/Istanbul")).date() - timedelta(days=day_limit or 0)
+    events: list[dict[str, object]] = []
+    for event in all_events:
+        try:
+            event_date = datetime.fromisoformat(str(event.get("match_date") or "")).date()
+        except ValueError:
+            continue
+        if day_limit is not None and event_date < cutoff:
+            continue
+        if selected_division != "Tüm ligler" and event.get("division") != selected_division:
+            continue
+        if selected_revision != "Tüm sürümler" and event.get("model_revision") != selected_revision:
+            continue
+        if selected_confidence != "Tümü" and event.get("confidence") != selected_confidence:
+            continue
+        events.append(event)
+
+    summary = summarize_events(events)
+    ms_summary = summarize_events(row for row in events if row.get("market") == "Maç sonucu")
+    metric_columns = st.columns(3)
+    metric_columns[0].metric("Sonuçlanan analiz", summary["match_count"])
+    metric_columns[1].metric(
+        "Genel doğruluk",
+        f"%{float(summary['accuracy']) * 100:.1f}" if summary["accuracy"] is not None else "—",
+    )
+    metric_columns[2].metric(
+        "MS Brier",
+        f"{float(ms_summary['brier']):.3f}" if ms_summary["brier"] is not None else "—",
+    )
+
+    status = str(summary["sample_status"])
+    status_text = {
+        "Yeterli": "Örneklem genel değerlendirme için yeterli.",
+        "Ön değerlendirme": "Örneklem ön değerlendirme düzeyinde; model değişikliği için henüz sınırlı.",
+        "Yetersiz": "Örneklem yetersiz; bu sonuçlarla model ağırlığı değiştirilmemeli.",
+    }[status]
+    if status == "Yeterli":
+        st.success(status_text)
+    elif status == "Ön değerlendirme":
+        st.warning(status_text)
+    else:
+        st.info(status_text)
+
+    if not events:
+        st.caption("Seçili filtrelerde olasılığı ve gerçek sonucu bulunan maç yok.")
+    else:
+        overview_tab, market_tab, league_tab = st.tabs(("Özet", "Pazarlar", "Ligler"))
+        with overview_tab:
+            confidence_rows = grouped_summary(events, "confidence")
+            confidence_order = {"Yüksek": 0, "Orta": 1, "Düşük": 2, "Bilinmeyen": 3}
+            confidence_rows.sort(key=lambda row: confidence_order.get(str(row["confidence"]), 9))
+            st.dataframe(
+                _performance_table(confidence_rows, "confidence"),
+                use_container_width=True, hide_index=True,
+            )
+        with market_tab:
+            st.dataframe(
+                _performance_table(grouped_summary(events, "market"), "market"),
+                use_container_width=True, hide_index=True,
+            )
+            st.caption("ROI yalnızca analiz anında ilgili oranı kaydedilmiş tahminlerde hesaplanır.")
+        with league_tab:
+            st.dataframe(
+                _performance_table(grouped_summary(events, "division"), "division"),
+                use_container_width=True, hide_index=True,
+            )
+
+    scored_matches = len({str(row.get("match_key") or "") for row in all_events})
+    st.caption(
+        f"Zamanı doğrulanan maç: {timing_stats['selected_matches']} · "
+        f"Sonuçla eşleşen: {scored_matches} · "
+        f"Yalnızca maç sonrası analiz: {timing_stats['post_match_only']} · "
+        f"Zamanı doğrulanamayan: {timing_stats['timing_unverifiable']}"
+    )
+
+
 def render_analysis_history_page(client: Client) -> None:
     st.subheader("📚 Analiz Geçmişi ve Sonuçlar")
     st.caption(
         "Her maçın son analiz sürümü gösterilir. Gerçek skor bir kez saklanır ve "
         "tahmin pazarları otomatik değerlendirilir."
     )
-    analyses, analysis_error = load_analysis_history(client)
+    analyses, analysis_error = load_analysis_history(client, limit=2000)
     if analysis_error:
         st.error("Kayıtlı analizler alınamadı.")
         st.caption(analysis_error)
@@ -1807,7 +1945,7 @@ def render_analysis_history_page(client: Client) -> None:
         if key not in latest_by_match:
             latest_by_match[key] = row
     latest = list(latest_by_match.values())
-    results, result_error = load_match_results(client)
+    results, result_error = load_match_results(client, limit=2000)
     if result_error:
         st.warning("Sonuç kayıt tablosu henüz kurulmamış olabilir.")
         with st.expander("Supabase için sonuç tablosu SQL kodunu göster"):
@@ -1902,35 +2040,21 @@ alter table public.match_results enable row level security;""",
             st.session_state["automatic_result_sync_message"] = True
             st.rerun()
 
-    evaluations: list[dict[str, object]] = []
-    for analysis in latest:
-        result = results.get(str(analysis.get("match_key") or ""))
-        if result:
-            evaluations.extend(evaluate_analysis(analysis, result))
-    ms_rows = [row for row in evaluations if row["Pazar"] == "Maç sonucu"]
-    total_rows = [row for row in evaluations if row["Pazar"] == "2.5 Alt/Üst"]
-    metric_columns = st.columns(4)
-    metric_columns[0].metric("Analiz edilen maç", len(latest))
-    metric_columns[1].metric("Sonucu girilen", len(results))
-    metric_columns[2].metric(
-        "MS başarısı",
-        f"%{sum(bool(row['Doğru']) for row in ms_rows) / len(ms_rows) * 100:.1f}"
-        if ms_rows else "—",
-    )
-    metric_columns[3].metric(
-        "2.5 başarısı",
-        f"%{sum(bool(row['Doğru']) for row in total_rows) / len(total_rows) * 100:.1f}"
-        if total_rows else "—",
-    )
+    render_live_performance_panel(analyses, results)
 
+    st.markdown("### Kayıtlı analizler")
     history_rows: list[dict[str, object]] = []
     for row in latest:
-        predictions = dict((row.get("report_snapshot") or {}).get("predictions") or {})
+        raw_snapshot = row.get("report_snapshot")
+        report_snapshot = raw_snapshot if isinstance(raw_snapshot, dict) else {}
+        predictions = dict(report_snapshot.get("predictions") or {})
         result = results.get(str(row.get("match_key") or ""))
         history_rows.append({
             "Tarih": row.get("match_date"), "Lig": row.get("division"),
             "Maç": f"{row.get('home_team')} — {row.get('away_team')}",
-            "Sürüm": row.get("version"), "MS": predictions.get("ms") or "—",
+            "Analiz": row.get("version"),
+            "Model": report_snapshot.get("model_revision") or "Legacy",
+            "MS": predictions.get("ms") or "—",
             "Skor": predictions.get("score") or "—",
             "Gerçek": f"{result['full_time_home']}-{result['full_time_away']}" if result else "Bekleniyor",
         })
