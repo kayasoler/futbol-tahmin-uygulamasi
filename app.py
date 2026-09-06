@@ -56,6 +56,7 @@ from highlightly import (
 )
 from league_mapping import division_for_api_league, match_team_name
 from results_api import fetch_match_result
+from supabase_resilience import fetch_team_catalog_with_retry
 from data_import import (
     FIXTURE_REQUIRED_COLUMNS,
     REQUIRED_COLUMNS,
@@ -136,32 +137,14 @@ def get_table_count(client: Client, table_name: str) -> int:
     return int(response.count or 0)
 
 
-def fetch_team_catalog(client: Client) -> tuple[list[str], list[str]]:
-    teams: set[str] = set()
-    divisions: set[str] = set()
-    page_size = 1000
-    start = 0
-
-    while True:
-        response = (
-            client.table("historical_matches")
-            .select("division,home_team,away_team")
-            .range(start, start + page_size - 1)
-            .execute()
+@st.cache_data(ttl=21600, show_spinner=False)
+def get_manual_team_catalog() -> tuple[list[str], list[str]]:
+    def fresh_client() -> Client:
+        return create_client(
+            st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_SERVICE_ROLE_KEY"]
         )
-        rows = response.data or []
-        for row in rows:
-            if row.get("division"):
-                divisions.add(str(row["division"]).strip())
-            if row.get("home_team"):
-                teams.add(str(row["home_team"]).strip())
-            if row.get("away_team"):
-                teams.add(str(row["away_team"]).strip())
-        if len(rows) < page_size:
-            break
-        start += page_size
 
-    return sorted(teams, key=str.casefold), sorted(divisions, key=str.casefold)
+    return fetch_team_catalog_with_retry(fresh_client, attempts=2)
 
 
 def fetch_recent_divisions(client: Client, maximum_rows: int = 5000) -> list[str]:
@@ -508,7 +491,16 @@ def render_fixture_csv_tab(client: Client, today) -> None:
 
 
 def render_manual_fixture_tab(client: Client, today) -> None:
-    teams, divisions = fetch_team_catalog(client)
+    try:
+        teams, divisions = get_manual_team_catalog()
+    except Exception as exc:
+        st.error("Manuel maç formu için takım ve lig listesi alınamadı.")
+        st.caption("Supabase bağlantısı kesildi. Ana fikstür ekranını kullanmaya devam edebilirsiniz.")
+        if st.button("Takım listesini yeniden dene", use_container_width=True):
+            get_manual_team_catalog.clear()
+            st.rerun()
+        st.code(str(exc))
+        return
     if len(teams) < 2 or not divisions:
         st.error("Manuel giriş için geçmiş verilerden yeterli takım veya lig bulunamadı.")
         return
@@ -615,6 +607,13 @@ def render_manual_fixture_tab(client: Client, today) -> None:
         f"{match_date.strftime('%d.%m.%Y')} · {home_team} — {away_team} kaydedildi."
     )
     st.rerun()
+
+
+def render_lazy_manual_fixture(client: Client, today, *, key: str) -> None:
+    if st.toggle("Manuel maç formunu yükle", value=False, key=key):
+        render_manual_fixture_tab(client, today)
+    else:
+        st.caption("Takım ve lig listesi yalnızca bu seçeneği açtığınızda Supabase'den alınır.")
 
 
 def render_match_analysis(
@@ -1205,7 +1204,7 @@ def render_upcoming_page(client: Client) -> None:
     with csv_tab:
         render_fixture_csv_tab(client, today)
     with manual_tab:
-        render_manual_fixture_tab(client, today)
+        render_lazy_manual_fixture(client, today, key="upcoming_manual_fixture_loader")
     with list_tab:
         render_upcoming_list_tab(client, today)
 
@@ -1410,7 +1409,7 @@ def render_football_data_fixtures_page(client: Client) -> None:
     if "last_manual_fixture" in st.session_state:
         st.success(st.session_state.pop("last_manual_fixture"))
     with st.expander("➕ Manuel maç ekle", expanded=False):
-        render_manual_fixture_tab(client, today)
+        render_lazy_manual_fixture(client, today, key="world_manual_fixture_loader")
 
     with st.expander("📄 Football-Data erişilemezse CSV yedeği", expanded=False):
         uploaded_fixture_file = st.file_uploader(
