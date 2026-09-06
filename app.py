@@ -47,9 +47,6 @@ from api_football import (
     fetch_bet365_odds,
     fetch_final_results_for_date,
     fetch_fixtures,
-    fetch_match_context,
-    fetch_match_lineups,
-    fetch_match_reference,
     match_final_result,
     normalize_api_keys,
 )
@@ -931,36 +928,31 @@ def render_match_analysis(
         st.info(f"İstatistiksel ön kupon: {report['coupon']}")
         st.caption(f"Lig örneklemi: {predictions['sample_size']} tamamlanmış maç.")
 
-    st.markdown("#### 5. Güncel takım ve oyuncu bağlamı")
-    api_football_keys = get_api_football_keys()
+    st.markdown("#### 5. Güncel takım ve kadro bağlamı")
     try:
         highlightly_api_key = str(st.secrets["HIGHLIGHTLY_API_KEY"]).strip()
     except (KeyError, FileNotFoundError):
         highlightly_api_key = ""
-    context_state_key = f"selected_match_context_v2_{match.get('id')}"
-    lineup_state_key = f"selected_match_lineups_v2_{match.get('id')}"
+    context_state_key = f"highlightly_context_v3_{match.get('id')}"
+    lineup_state_key = f"highlightly_lineups_v3_{match.get('id')}"
     context_changed = False
     stored_external = dict((analysis_record or {}).get("external_context") or {})
-    has_stored_team_context = any(
+    has_stored_team_context = stored_external.get("context_provider") != "api-football" and any(
         key in stored_external for key in ("standings", "home_last_five", "away_last_five")
     )
     if context_state_key not in st.session_state and has_stored_team_context:
         st.session_state[context_state_key] = {
-            "provider": stored_external.get("context_provider") or "kayıtlı veri",
-            "match": {
-                "id": stored_external.get("highlightly_match_id") or 0,
-                "api_fixture_id": stored_external.get("api_football_fixture_id"),
-            },
+            "provider": "highlightly",
+            "match": {"id": stored_external.get("highlightly_match_id") or 0},
             "standings": stored_external.get("standings") or [],
             "home_form": stored_external.get("home_last_five") or [],
             "away_form": stored_external.get("away_last_five") or [],
-            "injuries": stored_external.get("injuries") or [],
         }
         if stored_external.get("lineups"):
             st.session_state[lineup_state_key] = stored_external["lineups"]
     team_button, lineup_button = st.columns(2)
     team_context_requested = team_button.button(
-        "Son maçlar ve oyuncu durumunu getir",
+        "Güncel form ve puan durumunu getir",
         key=f"selected_context_button_{match.get('id')}",
         use_container_width=True,
     )
@@ -970,73 +962,37 @@ def render_match_analysis(
         use_container_width=True,
     )
     if has_stored_team_context and not (team_context_requested or lineup_requested):
-        st.info("Kayıtlı takım ve oyuncu bağlamı kullanılıyor; yeni API çağrısı yapılmadı.")
-    if not api_football_keys and not highlightly_api_key:
-        st.info("Bu veriler için API_FOOTBALL_KEYS veya HIGHLIGHTLY_API_KEY tanımlanmalıdır.")
+        st.info("Kayıtlı Highlightly takım bağlamı kullanılıyor; yeni API çağrısı yapılmadı.")
+    if not highlightly_api_key:
+        st.info("Bu veriler için HIGHLIGHTLY_API_KEY tanımlanmalıdır.")
     elif team_context_requested or lineup_requested:
         with st.spinner("Seçilen maçın güncel takım ve oyuncu verileri alınıyor..."):
             try:
                 if team_context_requested:
-                    get_api_football_match_context.clear()
                     get_highlightly_context.clear()
                 if lineup_requested:
-                    get_api_football_match_reference.clear()
-                    get_api_football_match_lineups.clear()
                     get_highlightly_lineups.clear()
                 live = st.session_state.get(context_state_key)
                 if (
                     not isinstance(live, dict)
                     or not live.get("match")
                     or team_context_requested
-                    or (lineup_requested and live.get("provider") not in {"api-football", "highlightly"})
+                    or (lineup_requested and live.get("provider") != "highlightly")
                 ):
-                    live = None
-                    api_error = ""
-                    if api_football_keys:
-                        try:
-                            context_loader = (
-                                get_api_football_match_context
-                                if team_context_requested
-                                else get_api_football_match_reference
-                            )
-                            candidate = context_loader(
-                                api_football_keys,
-                                str(match.get("match_date") or ""),
-                                home,
-                                away,
-                            )
-                            if candidate.get("match"):
-                                live = candidate
-                        except Exception as exc:
-                            api_error = str(exc)
-                    if live is None and highlightly_api_key:
-                        live = get_highlightly_context(
-                            highlightly_api_key,
-                            str(match.get("match_date") or ""),
-                            home,
-                            away,
-                        )
-                        live["provider"] = "highlightly"
-                        if api_error:
-                            live["fallback_reason"] = api_error
-                    if live is None:
-                        raise RuntimeError(api_error or "Seçilen maç API kaynaklarında eşleşmedi.")
+                    live = get_highlightly_context(
+                        highlightly_api_key,
+                        str(match.get("match_date") or ""),
+                        home,
+                        away,
+                    )
+                    live["provider"] = "highlightly"
                     st.session_state[context_state_key] = live
                 if lineup_requested and isinstance(live, dict) and live.get("match"):
                     try:
-                        if live.get("provider") == "api-football":
-                            fixture_id = int(live["match"]["api_fixture_id"])
-                            lineup_response = get_api_football_match_lineups(
-                                api_football_keys, fixture_id
-                            )
-                            st.session_state[lineup_state_key] = (
-                                lineup_response.get("lineups") or []
-                            )
-                        elif highlightly_api_key:
-                            requested_match_id = int(live["match"]["id"])
-                            st.session_state[lineup_state_key] = get_highlightly_lineups(
-                                highlightly_api_key, requested_match_id
-                            )
+                        requested_match_id = int(live["match"]["id"])
+                        st.session_state[lineup_state_key] = get_highlightly_lineups(
+                            highlightly_api_key, requested_match_id
+                        )
                     except Exception as exc:
                         st.session_state[lineup_state_key] = {"error": str(exc)}
                 context_changed = True
@@ -1047,11 +1003,8 @@ def render_match_analysis(
         st.warning("Seçilen maçın güncel takım ve oyuncu verileri alınamadı.")
         st.caption(str(live_context["error"]))
     elif isinstance(live_context, dict) and live_context.get("match"):
-        provider = str(live_context.get("provider") or "highlightly")
-        provider_label = "API-Football" if provider == "api-football" else "Highlightly"
-        st.success(f"{provider_label} seçilen maçı güvenilir biçimde eşleştirdi.")
-        if live_context.get("fallback_reason"):
-            st.caption("API-Football kullanılamadığı için Highlightly yedeği devreye girdi.")
+        provider = "highlightly"
+        st.success("Highlightly seçilen maçı güvenilir biçimde eşleştirdi.")
         standings_rows = live_context.get("standings") or []
         if standings_rows:
             st.markdown("##### Güncel puan durumu")
@@ -1063,44 +1016,23 @@ def render_match_analysis(
         with form_right:
             st.markdown(f"##### {away} · son 5")
             st.dataframe(pd.DataFrame(live_context.get("away_form") or []), use_container_width=True, hide_index=True)
-        injuries = live_context.get("injuries") or []
-        st.markdown("##### Oyuncu durumu")
-        if injuries:
-            st.dataframe(pd.DataFrame(injuries), use_container_width=True, hide_index=True)
-        else:
-            st.caption("API kaynağında bu maç için eksik/şüpheli oyuncu kaydı bulunamadı veya henüz yayımlanmadı.")
-        for warning in live_context.get("warnings") or []:
-            st.caption(str(warning))
         report.setdefault("external_context", {}).update({
             "standings": standings_rows,
             "home_last_five": live_context.get("home_form") or [],
             "away_last_five": live_context.get("away_form") or [],
-            "injuries": injuries,
             "context_provider": provider,
-            "highlightly_match_id": (
-                live_context.get("match", {}).get("id") if provider == "highlightly" else None
-            ),
-            "api_football_fixture_id": live_context.get("match", {}).get("api_fixture_id"),
+            "highlightly_match_id": live_context.get("match", {}).get("id"),
         })
         lineup_result = st.session_state.get(lineup_state_key)
         if isinstance(lineup_result, dict) and lineup_result.get("error"):
             st.caption("Kadrolar henüz yayımlanmamış olabilir: " + str(lineup_result["error"]))
         elif lineup_result:
-            if provider == "api-football":
-                for side in lineup_result:
-                    st.markdown(
-                        f"##### {side.get('team_name') or 'Takım'} · {side.get('formation') or '—'}"
-                    )
-                    st.write(", ".join(side.get("starting") or []) or "İlk 11 henüz yayımlanmadı.")
-                    if side.get("substitutes"):
-                        st.caption("Yedekler: " + ", ".join(side["substitutes"]))
-            else:
-                for side_key, side_label in (("homeTeam", "Ev sahibi kadrosu"), ("awayTeam", "Deplasman kadrosu")):
-                    side = lineup_result.get(side_key) or {}
-                    players = side.get("initialLineup") or []
-                    if players:
-                        st.markdown(f"##### {side_label} · {side.get('formation') or '—'}")
-                        st.write(", ".join(str(player.get("name") or "") for player in players))
+            for side_key, side_label in (("homeTeam", "Ev sahibi kadrosu"), ("awayTeam", "Deplasman kadrosu")):
+                side = lineup_result.get(side_key) or {}
+                players = side.get("initialLineup") or []
+                if players:
+                    st.markdown(f"##### {side_label} · {side.get('formation') or '—'}")
+                    st.write(", ".join(str(player.get("name") or "") for player in players))
             report["external_context"]["lineups"] = lineup_result
         elif lineup_requested:
             st.caption("Kadrolar henüz yayımlanmamış olabilir; mevcut veriler korunuyor. Daha sonra yeniden kontrol edebilirsiniz.")
@@ -1113,7 +1045,7 @@ def render_match_analysis(
             if artifact_error:
                 st.caption("Güncel takım bağlamı kalıcı önbelleğe yazılamadı: " + artifact_error)
     elif isinstance(live_context, dict):
-        st.info("Seçilen maç API kaynaklarında güvenilir biçimde eşleşmedi; yanlış takım verisi kullanılmadı.")
+        st.info("Highlightly seçilen maçı güvenilir biçimde eşleştiremedi; yanlış takım verisi kullanılmadı.")
 
     st.markdown("#### 6. Canlı araştırma ve yapay zekâ yorumu")
     st.write(
@@ -1318,27 +1250,6 @@ def get_api_football_fixtures(api_keys: tuple[str, ...], fixture_date: str) -> d
 @st.cache_data(ttl=1800, show_spinner=False)
 def get_api_bet365_odds(api_keys: tuple[str, ...], fixture_id: int) -> dict[str, object]:
     return fetch_bet365_odds(api_keys, fixture_id)
-
-
-@st.cache_data(ttl=1800, show_spinner=False)
-def get_api_football_match_context(
-    api_keys: tuple[str, ...], match_date: str, home: str, away: str
-) -> dict[str, object]:
-    return fetch_match_context(api_keys, match_date, home, away)
-
-
-@st.cache_data(ttl=1800, show_spinner=False)
-def get_api_football_match_reference(
-    api_keys: tuple[str, ...], match_date: str, home: str, away: str
-) -> dict[str, object]:
-    return fetch_match_reference(api_keys, match_date, home, away)
-
-
-@st.cache_data(ttl=900, show_spinner=False)
-def get_api_football_match_lineups(
-    api_keys: tuple[str, ...], fixture_id: int
-) -> dict[str, object]:
-    return fetch_match_lineups(api_keys, fixture_id)
 
 
 def get_api_football_keys() -> tuple[str, ...]:
