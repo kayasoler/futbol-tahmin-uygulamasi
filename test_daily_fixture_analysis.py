@@ -27,25 +27,35 @@ class DailyFixtureAnalysisTests(unittest.TestCase):
         self.assertEqual(winners[0]["b365_home"], 1.65)
         self.assertEqual(dropped[0]["entry_method"], "football-data-live")
 
-    def test_api_football_wins_and_uses_football_data_fallback_odds(self):
+    def test_uploaded_csv_wins_over_live_football_data(self):
         common = {
             "division": "E0", "match_date": "2026-09-06",
             "home_team": "Arsenal", "away_team": "Chelsea",
         }
-        api = dict(common, id="api-1", entry_method="api-football")
-        fallback = dict(
+        uploaded = dict(
             common,
-            id="fd-1",
-            entry_method="football-data-live",
-            b365_home=1.80,
-            b365_draw=3.50,
-            b365_away=4.20,
+            id="csv-1",
+            entry_method="csv",
+            b365_home=1.70,
+            b365_draw=3.60,
+            b365_away=4.50,
         )
-        winners, dropped = resolve_fixture_duplicates([fallback, api])
-        self.assertEqual(winners[0]["entry_method"], "api-football")
-        self.assertEqual(winners[0]["b365_home"], 1.80)
-        self.assertEqual(winners[0]["analysis_odds_source"], "Football-Data yedek oranı")
+        live = dict(common, id="fd-1", entry_method="football-data-live", b365_home=1.80)
+        winners, dropped = resolve_fixture_duplicates([live, uploaded])
+        self.assertEqual(winners[0]["entry_method"], "csv")
+        self.assertEqual(winners[0]["b365_home"], 1.70)
         self.assertEqual(dropped[0]["entry_method"], "football-data-live")
+
+    def test_manual_still_wins_over_uploaded_csv(self):
+        common = {
+            "division": "E0", "match_date": "2026-09-06",
+            "home_team": "Arsenal", "away_team": "Chelsea",
+        }
+        uploaded = dict(common, id="csv-1", entry_method="csv", b365_home=1.70)
+        manual = dict(common, id=9, entry_method="manual", b365_home=1.60)
+        winners, _ = resolve_fixture_duplicates([uploaded, manual])
+        self.assertEqual(winners[0]["entry_method"], "manual")
+        self.assertEqual(winners[0]["b365_home"], 1.60)
 
     def test_prepares_api_fixture_with_historical_team_names(self):
         prepared = prepare_api_fixture_for_analysis(

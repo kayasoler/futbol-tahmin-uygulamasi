@@ -41,14 +41,15 @@ from daily_fixture_analysis import (
     build_analysis_evidence,
     fixture_table_row,
     normalize_upcoming_fixture,
-    prepare_api_fixture_for_analysis,
     resolve_fixture_duplicates,
 )
 from api_football import (
     fetch_bet365_odds,
-    fetch_bet365_odds_for_date,
     fetch_final_results_for_date,
     fetch_fixtures,
+    fetch_match_context,
+    fetch_match_lineups,
+    fetch_match_reference,
     match_final_result,
     normalize_api_keys,
 )
@@ -931,63 +932,126 @@ def render_match_analysis(
         st.caption(f"Lig örneklemi: {predictions['sample_size']} tamamlanmış maç.")
 
     st.markdown("#### 5. Güncel takım ve oyuncu bağlamı")
+    api_football_keys = get_api_football_keys()
     try:
         highlightly_api_key = str(st.secrets["HIGHLIGHTLY_API_KEY"]).strip()
     except (KeyError, FileNotFoundError):
         highlightly_api_key = ""
-    context_state_key = f"highlightly_context_{match.get('id')}"
+    context_state_key = f"selected_match_context_v2_{match.get('id')}"
+    lineup_state_key = f"selected_match_lineups_v2_{match.get('id')}"
     context_changed = False
     stored_external = dict((analysis_record or {}).get("external_context") or {})
     has_stored_team_context = any(
         key in stored_external for key in ("standings", "home_last_five", "away_last_five")
     )
-    if context_state_key not in st.session_state and any(
-        key in stored_external for key in ("standings", "home_last_five", "away_last_five")
-    ):
+    if context_state_key not in st.session_state and has_stored_team_context:
         st.session_state[context_state_key] = {
-            "match": {"id": stored_external.get("highlightly_match_id") or 0},
+            "provider": stored_external.get("context_provider") or "kayıtlı veri",
+            "match": {
+                "id": stored_external.get("highlightly_match_id") or 0,
+                "api_fixture_id": stored_external.get("api_football_fixture_id"),
+            },
             "standings": stored_external.get("standings") or [],
             "home_form": stored_external.get("home_last_five") or [],
             "away_form": stored_external.get("away_last_five") or [],
+            "injuries": stored_external.get("injuries") or [],
         }
+        if stored_external.get("lineups"):
+            st.session_state[lineup_state_key] = stored_external["lineups"]
     team_button, lineup_button = st.columns(2)
     team_context_requested = team_button.button(
-        "Güncel form ve puan durumunu getir",
-        key=f"highlightly_context_button_{match.get('id')}",
+        "Son maçlar ve oyuncu durumunu getir",
+        key=f"selected_context_button_{match.get('id')}",
         use_container_width=True,
     )
     lineup_requested = lineup_button.button(
-        "Kesin kadroları kontrol et",
-        key=f"highlightly_lineups_button_{match.get('id')}",
+        "Kadroyu kontrol et",
+        key=f"selected_lineups_button_{match.get('id')}",
         use_container_width=True,
     )
     if has_stored_team_context and not (team_context_requested or lineup_requested):
-        st.info("Kayıtlı takım bağlamı kullanılıyor; Highlightly çağrısı yapılmadı.")
-    if not highlightly_api_key:
-        st.info("Highlightly verileri için HIGHLIGHTLY_API_KEY tanımlanmalıdır.")
+        st.info("Kayıtlı takım ve oyuncu bağlamı kullanılıyor; yeni API çağrısı yapılmadı.")
+    if not api_football_keys and not highlightly_api_key:
+        st.info("Bu veriler için API_FOOTBALL_KEYS veya HIGHLIGHTLY_API_KEY tanımlanmalıdır.")
     elif team_context_requested or lineup_requested:
-        with st.spinner("Highlightly takım eşleşmesi ve güncel veriler alınıyor..."):
+        with st.spinner("Seçilen maçın güncel takım ve oyuncu verileri alınıyor..."):
             try:
+                if team_context_requested:
+                    get_api_football_match_context.clear()
+                    get_highlightly_context.clear()
+                if lineup_requested:
+                    get_api_football_match_reference.clear()
+                    get_api_football_match_lineups.clear()
+                    get_highlightly_lineups.clear()
                 live = st.session_state.get(context_state_key)
-                if not isinstance(live, dict) or not live.get("match"):
-                    live = get_highlightly_context(
-                        highlightly_api_key, str(match.get("match_date") or ""), home, away
-                    )
+                if (
+                    not isinstance(live, dict)
+                    or not live.get("match")
+                    or team_context_requested
+                    or (lineup_requested and live.get("provider") not in {"api-football", "highlightly"})
+                ):
+                    live = None
+                    api_error = ""
+                    if api_football_keys:
+                        try:
+                            context_loader = (
+                                get_api_football_match_context
+                                if team_context_requested
+                                else get_api_football_match_reference
+                            )
+                            candidate = context_loader(
+                                api_football_keys,
+                                str(match.get("match_date") or ""),
+                                home,
+                                away,
+                            )
+                            if candidate.get("match"):
+                                live = candidate
+                        except Exception as exc:
+                            api_error = str(exc)
+                    if live is None and highlightly_api_key:
+                        live = get_highlightly_context(
+                            highlightly_api_key,
+                            str(match.get("match_date") or ""),
+                            home,
+                            away,
+                        )
+                        live["provider"] = "highlightly"
+                        if api_error:
+                            live["fallback_reason"] = api_error
+                    if live is None:
+                        raise RuntimeError(api_error or "Seçilen maç API kaynaklarında eşleşmedi.")
                     st.session_state[context_state_key] = live
                 if lineup_requested and isinstance(live, dict) and live.get("match"):
-                    requested_match_id = int(live["match"]["id"])
-                    st.session_state[f"highlightly_lineup_result_{requested_match_id}"] = (
-                        get_highlightly_lineups(highlightly_api_key, requested_match_id)
-                    )
+                    try:
+                        if live.get("provider") == "api-football":
+                            fixture_id = int(live["match"]["api_fixture_id"])
+                            lineup_response = get_api_football_match_lineups(
+                                api_football_keys, fixture_id
+                            )
+                            st.session_state[lineup_state_key] = (
+                                lineup_response.get("lineups") or []
+                            )
+                        elif highlightly_api_key:
+                            requested_match_id = int(live["match"]["id"])
+                            st.session_state[lineup_state_key] = get_highlightly_lineups(
+                                highlightly_api_key, requested_match_id
+                            )
+                    except Exception as exc:
+                        st.session_state[lineup_state_key] = {"error": str(exc)}
                 context_changed = True
             except Exception as exc:
                 st.session_state[context_state_key] = {"error": str(exc)}
     live_context = st.session_state.get(context_state_key)
     if isinstance(live_context, dict) and live_context.get("error"):
-        st.warning("Highlightly verileri alınamadı.")
+        st.warning("Seçilen maçın güncel takım ve oyuncu verileri alınamadı.")
         st.caption(str(live_context["error"]))
     elif isinstance(live_context, dict) and live_context.get("match"):
-        st.success("Highlightly maçı ve takımları güvenilir biçimde eşleştirdi.")
+        provider = str(live_context.get("provider") or "highlightly")
+        provider_label = "API-Football" if provider == "api-football" else "Highlightly"
+        st.success(f"{provider_label} seçilen maçı güvenilir biçimde eşleştirdi.")
+        if live_context.get("fallback_reason"):
+            st.caption("API-Football kullanılamadığı için Highlightly yedeği devreye girdi.")
         standings_rows = live_context.get("standings") or []
         if standings_rows:
             st.markdown("##### Güncel puan durumu")
@@ -999,24 +1063,47 @@ def render_match_analysis(
         with form_right:
             st.markdown(f"##### {away} · son 5")
             st.dataframe(pd.DataFrame(live_context.get("away_form") or []), use_container_width=True, hide_index=True)
+        injuries = live_context.get("injuries") or []
+        st.markdown("##### Oyuncu durumu")
+        if injuries:
+            st.dataframe(pd.DataFrame(injuries), use_container_width=True, hide_index=True)
+        else:
+            st.caption("API kaynağında bu maç için eksik/şüpheli oyuncu kaydı bulunamadı veya henüz yayımlanmadı.")
+        for warning in live_context.get("warnings") or []:
+            st.caption(str(warning))
         report.setdefault("external_context", {}).update({
             "standings": standings_rows,
             "home_last_five": live_context.get("home_form") or [],
             "away_last_five": live_context.get("away_form") or [],
-            "highlightly_match_id": live_context.get("match", {}).get("id"),
+            "injuries": injuries,
+            "context_provider": provider,
+            "highlightly_match_id": (
+                live_context.get("match", {}).get("id") if provider == "highlightly" else None
+            ),
+            "api_football_fixture_id": live_context.get("match", {}).get("api_fixture_id"),
         })
-        match_id = int(live_context["match"]["id"])
-        lineup_result = st.session_state.get(f"highlightly_lineup_result_{match_id}")
+        lineup_result = st.session_state.get(lineup_state_key)
         if isinstance(lineup_result, dict) and lineup_result.get("error"):
             st.caption("Kadrolar henüz yayımlanmamış olabilir: " + str(lineup_result["error"]))
         elif lineup_result:
-            for side_key, side_label in (("homeTeam", "Ev sahibi kadrosu"), ("awayTeam", "Deplasman kadrosu")):
-                side = lineup_result.get(side_key) or {}
-                players = side.get("initialLineup") or []
-                if players:
-                    st.markdown(f"##### {side_label} · {side.get('formation') or '—'}")
-                    st.write(", ".join(str(player.get("name") or "") for player in players))
+            if provider == "api-football":
+                for side in lineup_result:
+                    st.markdown(
+                        f"##### {side.get('team_name') or 'Takım'} · {side.get('formation') or '—'}"
+                    )
+                    st.write(", ".join(side.get("starting") or []) or "İlk 11 henüz yayımlanmadı.")
+                    if side.get("substitutes"):
+                        st.caption("Yedekler: " + ", ".join(side["substitutes"]))
+            else:
+                for side_key, side_label in (("homeTeam", "Ev sahibi kadrosu"), ("awayTeam", "Deplasman kadrosu")):
+                    side = lineup_result.get(side_key) or {}
+                    players = side.get("initialLineup") or []
+                    if players:
+                        st.markdown(f"##### {side_label} · {side.get('formation') or '—'}")
+                        st.write(", ".join(str(player.get("name") or "") for player in players))
             report["external_context"]["lineups"] = lineup_result
+        elif lineup_requested:
+            st.caption("Kadrolar henüz yayımlanmamış olabilir; mevcut veriler korunuyor. Daha sonra yeniden kontrol edebilirsiniz.")
         if context_changed:
             artifact_error = update_analysis_artifacts(
                 client,
@@ -1026,7 +1113,7 @@ def render_match_analysis(
             if artifact_error:
                 st.caption("Güncel takım bağlamı kalıcı önbelleğe yazılamadı: " + artifact_error)
     elif isinstance(live_context, dict):
-        st.info("Highlightly seçilen maçı güvenilir biçimde eşleştiremedi; yanlış takım verisi kullanılmadı.")
+        st.info("Seçilen maç API kaynaklarında güvenilir biçimde eşleşmedi; yanlış takım verisi kullanılmadı.")
 
     st.markdown("#### 6. Canlı araştırma ve yapay zekâ yorumu")
     st.write(
@@ -1234,10 +1321,24 @@ def get_api_bet365_odds(api_keys: tuple[str, ...], fixture_id: int) -> dict[str,
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def get_api_bet365_odds_for_date(
-    api_keys: tuple[str, ...], fixture_date: str
+def get_api_football_match_context(
+    api_keys: tuple[str, ...], match_date: str, home: str, away: str
 ) -> dict[str, object]:
-    return fetch_bet365_odds_for_date(api_keys, fixture_date)
+    return fetch_match_context(api_keys, match_date, home, away)
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def get_api_football_match_reference(
+    api_keys: tuple[str, ...], match_date: str, home: str, away: str
+) -> dict[str, object]:
+    return fetch_match_reference(api_keys, match_date, home, away)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def get_api_football_match_lineups(
+    api_keys: tuple[str, ...], fixture_id: int
+) -> dict[str, object]:
+    return fetch_match_lineups(api_keys, fixture_id)
 
 
 def get_api_football_keys() -> tuple[str, ...]:
@@ -1423,9 +1524,9 @@ def render_football_data_fixtures_page(client: Client) -> None:
     st.caption("Dünya Fikstürü · seçilen gün için istatistiksel ön analiz")
     st.subheader("🌍 Dünya Fikstürü")
     st.write(
-        "API-Football birincil kaynaktır; erişilemezse Football-Data otomatik devreye girer. "
-        "Manuel ve CSV maçları ayrı bölümlerde gösterilir. İstatistiksel analiz toplu "
-        "hazırlanır; haber/yapay zekâ ve kadro yalnızca seçtiğiniz maçta çalışır."
+        "Football-Data.co.uk fikstürleri, manuel ve CSV maçları ayrı bölümlerde gösterilir. "
+        "İstatistiksel analiz toplu hazırlanır; haber/yapay zekâ ve kadro yalnızca "
+        "seçtiğiniz maçta çalışır."
     )
     today = datetime.now(ZoneInfo("Europe/Istanbul")).date()
     if "last_manual_fixture" in st.session_state:
@@ -1433,7 +1534,7 @@ def render_football_data_fixtures_page(client: Client) -> None:
     with st.expander("➕ Manuel maç ekle", expanded=False):
         render_lazy_manual_fixture(client, today, key="world_manual_fixture_loader")
 
-    with st.expander("📄 Otomatik kaynaklar erişilemezse CSV yedeği", expanded=False):
+    with st.expander("📄 CSV fikstür yükle", expanded=False):
         uploaded_fixture_file = st.file_uploader(
             "fixtures.csv dosyasını seçin",
             type=["csv"],
@@ -1441,19 +1542,13 @@ def render_football_data_fixtures_page(client: Client) -> None:
         )
         st.caption(
             "Football-Data biçimi kullanılır: Div, Date, Time, HomeTeam, AwayTeam, "
-            "B365H, B365D ve B365A sütunları zorunludur. Dosya yalnızca bu çalıştırmada kullanılır."
+            "B365H, B365D ve B365A sütunları zorunludur. Aynı maçta yüklenen CSV, "
+            "Football-Data kaydının önüne geçer; manuel kayıt en yüksek önceliktedir."
         )
 
     selected_date = st.date_input("Fikstür tarihi", value=today, key="daily_fixture_date")
     requested_date = selected_date.isoformat()
     result_key = "daily_fixture_analysis_result"
-    api_snapshot_key = "api_football_fixture_snapshot"
-    api_snapshot_date_key = "api_football_fixture_snapshot_date"
-    api_snapshot_time_key = "api_football_fixture_snapshot_time"
-    api_odds_snapshot_key = "api_football_odds_snapshot"
-    api_odds_snapshot_date_key = "api_football_odds_snapshot_date"
-    api_error_key = "api_football_fixture_source_error"
-    api_odds_error_key = "api_football_odds_source_error"
     snapshot_key = "football_data_fixture_snapshot"
     snapshot_time_key = "football_data_fixture_snapshot_time"
     source_error_key = "football_data_fixture_source_error"
@@ -1463,43 +1558,10 @@ def render_football_data_fixtures_page(client: Client) -> None:
         type="primary",
         use_container_width=True,
     )
-    refresh_source = action_right.button("Kaynakları yenile", use_container_width=True)
+    refresh_source = action_right.button("Kaynağı yenile", use_container_width=True)
     if refresh_source:
-        get_api_football_fixtures.clear()
-        get_api_bet365_odds_for_date.clear()
         get_football_data_fixtures.clear()
-        api_keys = get_api_football_keys()
-        api_refreshed = football_data_refreshed = False
-        with st.spinner("API-Football ve yedek kaynak yenileniyor..."):
-            if api_keys:
-                try:
-                    refreshed_api = get_api_football_fixtures(api_keys, requested_date)
-                    st.session_state[api_snapshot_key] = list(
-                        refreshed_api.get("fixtures") or []
-                    )
-                    st.session_state[api_snapshot_date_key] = requested_date
-                    st.session_state[api_snapshot_time_key] = datetime.now(
-                        ZoneInfo("Europe/Istanbul")
-                    ).strftime("%d.%m.%Y %H:%M")
-                    st.session_state.pop(api_error_key, None)
-                    api_refreshed = True
-                    try:
-                        refreshed_odds = get_api_bet365_odds_for_date(
-                            api_keys, requested_date
-                        )
-                        st.session_state[api_odds_snapshot_key] = dict(
-                            refreshed_odds.get("odds_by_fixture") or {}
-                        )
-                        st.session_state[api_odds_snapshot_date_key] = requested_date
-                        st.session_state.pop(api_odds_error_key, None)
-                    except Exception as exc:
-                        st.session_state[api_odds_error_key] = str(exc)
-                except Exception as exc:
-                    st.session_state[api_error_key] = str(exc)
-            else:
-                st.session_state[api_error_key] = (
-                    "Streamlit Secrets içinde API_FOOTBALL_KEY bulunamadı."
-                )
+        with st.spinner("Football-Data yeniden deneniyor..."):
             try:
                 refreshed_rows = fetch_current_fixtures()
                 st.session_state[snapshot_key] = refreshed_rows
@@ -1507,19 +1569,19 @@ def render_football_data_fixtures_page(client: Client) -> None:
                     ZoneInfo("Europe/Istanbul")
                 ).strftime("%d.%m.%Y %H:%M")
                 st.session_state.pop(source_error_key, None)
-                football_data_refreshed = True
+                st.success("Football-Data fikstürü başarıyla yenilendi.")
             except Exception as exc:
                 st.session_state[source_error_key] = str(exc)
-        if api_refreshed:
-            st.success("API-Football fikstürü başarıyla yenilendi.")
-        elif st.session_state.get(api_snapshot_key):
-            st.warning("API-Football erişilemedi; son başarılı API fikstürü korunuyor.")
-        else:
-            st.warning("API-Football erişilemedi; Football-Data yedeği kullanılacak.")
-        if football_data_refreshed:
-            st.caption("Football-Data yedek fikstürü de güncellendi.")
-        elif st.session_state.get(snapshot_key):
-            st.caption("Football-Data yenilenemedi; son başarılı yedek korunuyor.")
+                if st.session_state.get(snapshot_key):
+                    st.warning(
+                        "Football-Data hâlâ erişilemiyor; son başarılı fikstür korundu. "
+                        + str(exc)
+                    )
+                else:
+                    st.warning(
+                        "Football-Data hâlâ erişilemiyor. CSV yedeği veya manuel kayıt "
+                        "kullanabilirsiniz. " + str(exc)
+                    )
     if run_analysis:
         try:
             stored_rows = fetch_fixture_rows_for_date(client, requested_date)
@@ -1527,55 +1589,6 @@ def render_football_data_fixtures_page(client: Client) -> None:
             st.error("Manuel ve CSV maçları alınamadı.")
             st.caption(str(exc))
             return
-
-        api_keys = get_api_football_keys()
-        api_warning = ""
-        api_odds_warning = ""
-        used_api_snapshot = False
-        api_fixture_rows: list[dict[str, object]] = []
-        api_odds_by_fixture: dict[str, dict[str, object]] = {}
-        if api_keys:
-            try:
-                api_result = get_api_football_fixtures(api_keys, requested_date)
-                api_fixture_rows = [dict(row) for row in (api_result.get("fixtures") or [])]
-                st.session_state[api_snapshot_key] = api_fixture_rows
-                st.session_state[api_snapshot_date_key] = requested_date
-                st.session_state[api_snapshot_time_key] = datetime.now(
-                    ZoneInfo("Europe/Istanbul")
-                ).strftime("%d.%m.%Y %H:%M")
-                st.session_state.pop(api_error_key, None)
-            except Exception as exc:
-                api_warning = str(exc)
-                st.session_state[api_error_key] = api_warning
-                if st.session_state.get(api_snapshot_date_key) == requested_date:
-                    api_fixture_rows = [
-                        dict(row) for row in (st.session_state.get(api_snapshot_key) or [])
-                    ]
-                    used_api_snapshot = bool(api_fixture_rows)
-            if api_fixture_rows:
-                try:
-                    odds_result = get_api_bet365_odds_for_date(api_keys, requested_date)
-                    api_odds_by_fixture = {
-                        str(key): dict(value)
-                        for key, value in dict(
-                            odds_result.get("odds_by_fixture") or {}
-                        ).items()
-                    }
-                    st.session_state[api_odds_snapshot_key] = api_odds_by_fixture
-                    st.session_state[api_odds_snapshot_date_key] = requested_date
-                    st.session_state.pop(api_odds_error_key, None)
-                except Exception as exc:
-                    api_odds_warning = str(exc)
-                    st.session_state[api_odds_error_key] = api_odds_warning
-                    if st.session_state.get(api_odds_snapshot_date_key) == requested_date:
-                        api_odds_by_fixture = {
-                            str(key): dict(value)
-                            for key, value in dict(
-                                st.session_state.get(api_odds_snapshot_key) or {}
-                            ).items()
-                        }
-        else:
-            api_warning = "Streamlit Secrets içinde API_FOOTBALL_KEY bulunamadı."
 
         source_warning = ""
         used_football_data_snapshot = False
@@ -1596,29 +1609,6 @@ def render_football_data_fixtures_page(client: Client) -> None:
             if str(row.get("match_date") or "") == requested_date
         ]
 
-        league_cache: dict[str, list[dict[str, object]]] = {}
-        try:
-            available_divisions = set(get_supported_divisions())
-        except Exception as exc:
-            available_divisions = set()
-            api_warning = (api_warning + " | " if api_warning else "") + str(exc)
-        prepared_api_rows: list[dict[str, object]] = []
-        for original in api_fixture_rows:
-            row = dict(original)
-            row.update(api_odds_by_fixture.get(str(row.get("api_fixture_id")), {}))
-            division = division_for_api_league(row.get("league_id"), available_divisions)
-            league_rows: list[dict[str, object]] = []
-            if division:
-                try:
-                    if division not in league_cache:
-                        league_cache[division] = fetch_league_rows(client, division)
-                    league_rows = league_cache[division]
-                except Exception:
-                    league_cache.pop(division, None)
-            prepared_api_rows.append(
-                prepare_api_fixture_for_analysis(row, available_divisions, league_rows)
-            )
-
         uploaded_rows: list[dict[str, object]] = []
         if uploaded_fixture_file is not None:
             try:
@@ -1631,9 +1621,10 @@ def render_football_data_fixtures_page(client: Client) -> None:
                 st.caption(str(exc))
                 return
         fixtures, dropped = resolve_fixture_duplicates(
-            prepared_api_rows + football_data_rows + stored_rows + uploaded_rows
+            football_data_rows + uploaded_rows + stored_rows
         )
         outcomes: list[dict[str, object]] = []
+        league_cache: dict[str, list[dict[str, object]]] = {}
         progress = st.progress(0, text="Maçlar istatistiksel olarak değerlendiriliyor...")
         for index, fixture in enumerate(fixtures, start=1):
             outcomes.append(analyze_daily_fixture(client, fixture, league_cache))
@@ -1643,12 +1634,9 @@ def render_football_data_fixtures_page(client: Client) -> None:
             "date": requested_date,
             "outcomes": outcomes,
             "duplicate_count": len(dropped),
-            "api_warning": api_warning,
-            "api_odds_warning": api_odds_warning,
-            "api_count": len(prepared_api_rows),
-            "used_api_snapshot": used_api_snapshot,
             "source_warning": source_warning,
             "used_snapshot": used_football_data_snapshot,
+            "football_data_count": len(football_data_rows),
             "uploaded_count": len(uploaded_rows),
         }
 
@@ -1656,47 +1644,34 @@ def render_football_data_fixtures_page(client: Client) -> None:
     if not isinstance(result, dict) or result.get("date") != requested_date:
         st.caption("Tarihi seçip analizi başlatın. Kayıtlı analizler otomatik yeniden hesaplanmaz.")
         return
-    if result.get("api_warning"):
-        if result.get("used_api_snapshot"):
-            snapshot_time = st.session_state.get(api_snapshot_time_key) or "zamanı bilinmiyor"
-            st.warning(
-                f"API-Football erişilemedi; {snapshot_time} tarihli son başarılı API fikstürü "
-                "kullanıldı. " + str(result["api_warning"])
-            )
-        else:
-            st.warning(
-                "API-Football erişilemedi; Football-Data ve diğer yedekler kullanıldı. "
-                + str(result["api_warning"])
-            )
-    elif result.get("api_count"):
-        st.success(f"API-Football birincil kaynağından {result['api_count']} maç alındı.")
-    if result.get("api_odds_warning"):
-        st.caption(
-            "API-Football Bet365 oranları alınamadı; eşleşen maçlarda Football-Data veya "
-            "manuel oranlar kullanılacak. " + str(result["api_odds_warning"])
-        )
     if result.get("source_warning"):
         if result.get("used_snapshot"):
             snapshot_time = st.session_state.get(snapshot_time_key) or "zamanı bilinmiyor"
             st.caption(
-                f"Football-Data yedeği erişilemedi; {snapshot_time} tarihli son başarılı yedek kullanıldı. "
+                f"Football-Data erişilemedi; {snapshot_time} tarihli son başarılı fikstür kullanıldı. "
                 + str(result["source_warning"])
             )
         else:
             st.caption(
-                "Football-Data yedeği erişilemedi; API-Football, manuel ve CSV kayıtları işlendi. "
+                "Football-Data erişilemedi; manuel ve CSV kayıtları işlendi. "
                 + str(result["source_warning"])
             )
+    elif result.get("football_data_count"):
+        st.success(
+            f"Football-Data.co.uk kaynağından seçilen güne ait "
+            f"{result['football_data_count']} maç alındı."
+        )
     if result.get("uploaded_count"):
-        st.info(f"CSV yedeğinden seçilen güne ait {result['uploaded_count']} maç okundu.")
+        st.info(f"Yüklenen CSV'den seçilen güne ait {result['uploaded_count']} maç okundu ve işlendi.")
     if result.get("duplicate_count"):
         st.info(
-            f"{result['duplicate_count']} yinelenen maç tekilleştirildi. Manuel kayıt varsa manuel oranlar kullanıldı."
+            f"{result['duplicate_count']} yinelenen maç tekilleştirildi. Öncelik sırası: "
+            "manuel, yüklenen CSV, Football-Data."
         )
     outcomes = list(result.get("outcomes") or [])
     if not outcomes:
         st.info(
-            "Seçilen gün için kullanılabilir maç bulunamadı. Otomatik kaynakları yenileyin "
+            "Seçilen gün için kullanılabilir maç bulunamadı. Football-Data kaynağını yenileyin "
             "veya yukarıdan fixtures.csv yükleyin."
         )
         return
@@ -1708,7 +1683,7 @@ def render_football_data_fixtures_page(client: Client) -> None:
     metric_columns[2].metric("Analiz edilemedi", len(failed))
 
     selected_pair: tuple[int, dict[str, object]] | None = None
-    for source in ("api-football", "football-data-live", "manual", "csv"):
+    for source in ("football-data-live", "manual", "csv"):
         indexed = [(index, outcome) for index, outcome in enumerate(outcomes) if outcome.get("report") and outcome.get("source") == source]
         st.markdown(f"#### {SOURCE_LABELS[source]}")
         if not indexed:

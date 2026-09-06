@@ -138,6 +138,140 @@ def fetch_fixtures(
     }
 
 
+def match_fixture(
+    fixtures: list[dict[str, Any]], home_team: str, away_team: str
+) -> dict[str, Any] | None:
+    """Resolve one selected match without trusting provider team names exactly."""
+    candidates: list[tuple[float, dict[str, Any]]] = []
+    for fixture in fixtures:
+        home_score = _team_score(home_team, fixture.get("home_team"))
+        away_score = _team_score(away_team, fixture.get("away_team"))
+        if min(home_score, away_score) < 0.72:
+            continue
+        candidates.append((home_score + away_score, fixture))
+    return dict(max(candidates, key=lambda item: item[0])[1]) if candidates else None
+
+
+def normalize_recent_fixture(item: dict[str, Any], selected_team_id: int) -> dict[str, Any]:
+    fixture = item.get("fixture") or {}
+    teams = item.get("teams") or {}
+    home = teams.get("home") or {}
+    away = teams.get("away") or {}
+    goals = item.get("goals") or {}
+    home_goals = goals.get("home")
+    away_goals = goals.get("away")
+    score = "—" if home_goals is None or away_goals is None else f"{home_goals}-{away_goals}"
+    return {
+        "Tarih": str(fixture.get("date") or "")[:10],
+        "Ev sahibi": home.get("name") or "—",
+        "Deplasman": away.get("name") or "—",
+        "Skor": score,
+        "Saha": "İç saha" if home.get("id") == selected_team_id else "Deplasman",
+    }
+
+
+def normalize_injuries(response: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for item in response:
+        team = item.get("team") or {}
+        player = item.get("player") or {}
+        rows.append({
+            "Takım": team.get("name") or "—",
+            "Oyuncu": player.get("name") or "—",
+            "Durum": player.get("type") or "—",
+            "Neden": player.get("reason") or "—",
+        })
+    return rows
+
+
+def normalize_lineups(response: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    lineups: list[dict[str, Any]] = []
+    for item in response:
+        team = item.get("team") or {}
+
+        def player_names(key: str) -> list[str]:
+            names: list[str] = []
+            for row in item.get(key) or []:
+                player = row.get("player") or {}
+                name = str(player.get("name") or "").strip()
+                if name:
+                    names.append(name)
+            return names
+
+        lineups.append({
+            "team_id": team.get("id"),
+            "team_name": team.get("name") or "—",
+            "formation": item.get("formation") or "—",
+            "starting": player_names("startXI"),
+            "substitutes": player_names("substitutes"),
+        })
+    return lineups
+
+
+def fetch_match_context(
+    api_keys: str | Iterable[str], match_date: date | str, home_team: str, away_team: str
+) -> dict[str, Any]:
+    """Fetch on-demand form and player availability for one selected fixture."""
+    reference = fetch_match_reference(api_keys, match_date, home_team, away_team)
+    match = reference.get("match")
+    if not match:
+        return reference
+    home_id = int(match["home_team_id"])
+    away_id = int(match["away_team_id"])
+    warnings: list[str] = []
+
+    def recent(team_id: int) -> list[dict[str, Any]]:
+        try:
+            result = _get(
+                api_keys,
+                "fixtures",
+                {"team": team_id, "last": 5, "timezone": "Europe/Istanbul"},
+            )
+            return [normalize_recent_fixture(item, team_id) for item in result["response"]]
+        except Exception as exc:
+            warnings.append(f"Son maçlar alınamadı: {exc}")
+            return []
+
+    try:
+        injury_result = _get(api_keys, "injuries", {"fixture": match["api_fixture_id"]})
+        injuries = normalize_injuries(injury_result["response"])
+    except Exception as exc:
+        warnings.append(f"Oyuncu durumu alınamadı: {exc}")
+        injuries = []
+    return {
+        **reference,
+        "home_form": recent(home_id),
+        "away_form": recent(away_id),
+        "injuries": injuries,
+        "standings": [],
+        "warnings": warnings,
+    }
+
+
+def fetch_match_reference(
+    api_keys: str | Iterable[str], match_date: date | str, home_team: str, away_team: str
+) -> dict[str, Any]:
+    """Resolve one fixture with a single request for lineup-only actions."""
+    fixture_result = fetch_fixtures(api_keys, match_date)
+    match = match_fixture(fixture_result["fixtures"], home_team, away_team)
+    return {
+        "provider": "api-football",
+        "match": match,
+        "home_form": [],
+        "away_form": [],
+        "injuries": [],
+        "standings": [],
+        "warnings": [],
+    }
+
+
+def fetch_match_lineups(
+    api_keys: str | Iterable[str], fixture_id: int | str
+) -> dict[str, Any]:
+    result = _get(api_keys, "fixtures/lineups", {"fixture": fixture_id})
+    return {"lineups": normalize_lineups(result["response"]), "quota": result["quota"]}
+
+
 def _match_winner_values(bets: list[dict[str, Any]]) -> dict[str, float]:
     for bet in bets:
         if str(bet.get("name") or "").strip().casefold() not in {"match winner", "1x2", "winner"}:
