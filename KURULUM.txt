@@ -27,7 +27,7 @@ Onemli:
 - Streamlit Secrets icinde GEMINI_API_KEY ve TAVILY_API_KEY varsa Gemini haberleri tum istatistiklerle birlestirip kendi tahminini ve kupon yorumunu uretir.
 - API_FOOTBALL_KEY eklenirse Dünya Fikstürü API-Football'ı birincil kaynak olarak kullanır; hata veya kota durumunda Football-Data, son başarılı kayıt, CSV ve manuel girişler çalışmaya devam eder.
 - API-Football anahtarı GitHub dosyalarına yazılmaz; Streamlit Secrets içinde tutulur.
-- Birden fazla anahtar için API_FOOTBALL_KEYS = ["anahtar1", "anahtar2", "anahtar3"] kullanılabilir; kota veya anahtar hatasında sıradaki anahtar denenir.
+- Birden fazla anahtar için API_FOOTBALL_KEYS = ["anahtar1", "anahtar2"] kullanılabilir; ilk anahtar bağlantı/zaman aşımı, geçersiz yanıt, 401/403, kota veya geçici 5xx hatası verirse sıradaki anahtar otomatik denenir.
 - Seçilen günün API-Football Bet365 oranları 30 dakika önbellekte tutulur; oran bulunamazsa eşleşen Football-Data oranı yedek olarak kullanılır, manuel oranlar her zaman önceliklidir.
 - Yaklaşık açılış oranı isteğe bağlıdır; boş bırakılırsa güncel oranla analiz devam eder.
 - Manuel açılış alanları 1-X-2 ile birlikte Bet365 2.5 Üst/Alt oranlarını da kabul eder ve iki piyasanın hareketini marjdan arındırarak gösterir.

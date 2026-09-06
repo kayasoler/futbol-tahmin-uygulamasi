@@ -1,5 +1,7 @@
 import unittest
+from io import BytesIO
 from unittest.mock import patch
+from urllib.error import HTTPError, URLError
 
 from api_football import (
     fetch_bet365_odds_for_date,
@@ -12,9 +14,62 @@ from api_football import (
 )
 
 
+class FakeResponse:
+    def __init__(self, payload: bytes):
+        self.payload = payload
+        self.headers = {}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def read(self):
+        return self.payload
+
+
 class ApiFootballTests(unittest.TestCase):
     def test_normalizes_and_deduplicates_api_keys(self):
         self.assertEqual(normalize_api_keys(" first,second;first "), ["first", "second"])
+
+    @patch("api_football.urlopen")
+    def test_uses_second_key_after_first_connection_failure(self, opener):
+        opener.side_effect = [
+            URLError("temporary block"),
+            FakeResponse(b'{"errors": [], "response": [], "paging": {}}'),
+        ]
+        result = fetch_bet365_odds_for_date(
+            ("first-key", "second-key"), "2026-09-06", max_pages=1
+        )
+        self.assertEqual(result["quota"]["key_number"], 2)
+        self.assertEqual(opener.call_count, 2)
+
+    @patch("api_football.urlopen")
+    def test_uses_second_key_after_first_invalid_response(self, opener):
+        opener.side_effect = [
+            FakeResponse(b'not-json'),
+            FakeResponse(b'{"errors": [], "response": [], "paging": {}}'),
+        ]
+        result = fetch_bet365_odds_for_date(
+            ("first-key", "second-key"), "2026-09-06", max_pages=1
+        )
+        self.assertEqual(result["quota"]["key_number"], 2)
+        self.assertEqual(opener.call_count, 2)
+
+    @patch("api_football.urlopen")
+    def test_uses_second_key_after_first_temporary_server_error(self, opener):
+        opener.side_effect = [
+            HTTPError(
+                "https://example.test", 503, "unavailable", {}, BytesIO(b'temporary')
+            ),
+            FakeResponse(b'{"errors": [], "response": [], "paging": {}}'),
+        ]
+        result = fetch_bet365_odds_for_date(
+            ("first-key", "second-key"), "2026-09-06", max_pages=1
+        )
+        self.assertEqual(result["quota"]["key_number"], 2)
+        self.assertEqual(opener.call_count, 2)
 
     def test_normalizes_fixture_for_analysis(self):
         row = normalize_fixture(

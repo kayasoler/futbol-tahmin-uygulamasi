@@ -13,6 +13,7 @@ from league_mapping import team_name_key
 
 BASE_URL = "https://v3.football.api-sports.io"
 FINAL_FIXTURE_STATUSES = {"FT", "AET", "PEN"}
+RETRYABLE_HTTP_CODES = {408, 425, 429, 500, 502, 503, 504}
 
 
 def normalize_api_keys(value: str | Iterable[str]) -> list[str]:
@@ -42,6 +43,8 @@ def _get(api_keys: str | Iterable[str], endpoint: str, params: dict[str, Any]) -
         try:
             with urlopen(request, timeout=35) as response:
                 payload = json.loads(response.read().decode("utf-8"))
+                if not isinstance(payload, dict):
+                    raise ValueError("API-Football yanıtı JSON nesnesi değil")
                 headers = {
                     "daily_limit": response.headers.get("x-ratelimit-requests-limit"),
                     "daily_remaining": response.headers.get("x-ratelimit-requests-remaining"),
@@ -50,17 +53,26 @@ def _get(api_keys: str | Iterable[str], endpoint: str, params: dict[str, Any]) -
         except HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
             failures.append(f"anahtar {index + 1}: HTTP {exc.code} {detail[:160]}")
-            if exc.code in {401, 403, 429}:
+            if exc.code in {401, 403} | RETRYABLE_HTTP_CODES:
                 continue
             raise RuntimeError(f"API-Football HTTP {exc.code}: {detail[:500]}") from exc
         except (URLError, TimeoutError) as exc:
-            raise RuntimeError(f"API-Football bağlantı hatası: {exc}") from exc
+            failures.append(f"anahtar {index + 1}: bağlantı hatası {str(exc)[:160]}")
+            continue
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
+            failures.append(f"anahtar {index + 1}: geçersiz yanıt {str(exc)[:160]}")
+            continue
         errors = payload.get("errors") or []
         if errors:
             error_text = str(errors)
             failures.append(f"anahtar {index + 1}: {error_text[:160]}")
             lowered = error_text.casefold()
-            if any(word in lowered for word in ("limit", "quota", "key", "request")):
+            if any(
+                word in lowered
+                for word in (
+                    "limit", "quota", "key", "request", "plan", "subscription", "access"
+                )
+            ):
                 continue
             raise RuntimeError(f"API-Football hata yanıtı: {errors}")
         return {
