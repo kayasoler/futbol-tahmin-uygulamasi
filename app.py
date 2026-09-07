@@ -31,6 +31,7 @@ from analysis_store import (
     load_analysis_history,
     load_latest_analysis,
     load_match_results,
+    pending_manual_result_analyses,
     restore_report_snapshot,
     save_analysis_version,
     save_match_result,
@@ -2065,22 +2066,7 @@ alter table public.match_results enable row level security;""",
             )
 
     now_istanbul = datetime.now(ZoneInfo("Europe/Istanbul"))
-    result_candidates: list[dict[str, object]] = []
-    for analysis in latest:
-        if str(analysis.get("match_key") or "") in results:
-            continue
-        try:
-            candidate_date = datetime.fromisoformat(str(analysis.get("match_date"))).date()
-            candidate_time = time.fromisoformat(
-                str(analysis.get("kickoff_time") or "23:59:59")[:8]
-            )
-            expected_finish = datetime.combine(
-                candidate_date, candidate_time, tzinfo=ZoneInfo("Europe/Istanbul")
-            ) + timedelta(hours=2, minutes=30)
-        except ValueError:
-            continue
-        if expected_finish <= now_istanbul:
-            result_candidates.append(analysis)
+    result_candidates = pending_manual_result_analyses(latest, results, now_istanbul)
 
     if st.session_state.pop("automatic_result_sync_message", None):
         sync_message = st.session_state["automatic_result_sync_last"]
@@ -2215,55 +2201,52 @@ alter table public.match_results enable row level security;""",
         })
     st.dataframe(pd.DataFrame(history_rows), use_container_width=True, hide_index=True)
 
+    if st.session_state.pop("result_saved_message", False):
+        st.success("Maç sonucu kaydedildi ve tahminler değerlendirildi.")
+    if result_error:
+        st.info("Sonuç tablosu kullanılamadığı için manuel giriş listesi gösterilemiyor.")
+        return
+    if not result_candidates:
+        st.success("Otomatik alınamayan ve manuel sonuç girişi bekleyen maç yok.")
+        return
+
+    st.markdown("### Otomatik alınamayan sonucu manuel gir")
     labels = {
         str(row["match_key"]): f"{row.get('match_date')} · {row.get('home_team')} — {row.get('away_team')}"
-        for row in latest
+        for row in result_candidates
     }
     selected_key = st.selectbox(
-        "Sonucunu görüntüle veya gir", list(labels), format_func=lambda key: labels[key]
+        "Sonucu otomatik alınamayan maç", list(labels), format_func=lambda key: labels[key]
     )
     selected = latest_by_match[selected_key]
-    stored_result = results.get(selected_key)
-    match_date = datetime.fromisoformat(str(selected.get("match_date"))).date()
-    kickoff_text = str(selected.get("kickoff_time") or "23:59:59")[:8]
-    try:
-        kickoff_clock = time.fromisoformat(kickoff_text)
-    except ValueError:
-        kickoff_clock = time(23, 59, 59)
-    kickoff = datetime.combine(match_date, kickoff_clock, tzinfo=ZoneInfo("Europe/Istanbul"))
-    match_started = datetime.now(ZoneInfo("Europe/Istanbul")) >= kickoff
-    if not match_started and not stored_result:
-        st.info("Bu maç henüz başlamadığı için gerçek sonuç kaydı kapalıdır.")
 
     st.markdown("#### Gerçek maç sonucu")
     with st.form(f"result_form_{selected_key}"):
         full_columns = st.columns(2)
         full_home = full_columns[0].number_input(
             f"MS · {selected.get('home_team')}", min_value=0, max_value=30,
-            value=int((stored_result or {}).get("full_time_home") or 0), step=1,
+            value=0, step=1,
         )
         full_away = full_columns[1].number_input(
             f"MS · {selected.get('away_team')}", min_value=0, max_value=30,
-            value=int((stored_result or {}).get("full_time_away") or 0), step=1,
+            value=0, step=1,
         )
         has_half_time = st.checkbox(
-            "İlk yarı skoru da mevcut",
-            value=(stored_result or {}).get("half_time_home") is not None,
+            "İlk yarı skoru da mevcut", value=False,
         )
         half_home = half_away = 0
         if has_half_time:
             half_columns = st.columns(2)
             half_home = half_columns[0].number_input(
                 f"İY · {selected.get('home_team')}", min_value=0, max_value=20,
-                value=int((stored_result or {}).get("half_time_home") or 0), step=1,
+                value=0, step=1,
             )
             half_away = half_columns[1].number_input(
                 f"İY · {selected.get('away_team')}", min_value=0, max_value=20,
-                value=int((stored_result or {}).get("half_time_away") or 0), step=1,
+                value=0, step=1,
             )
         submitted = st.form_submit_button(
-            "Sonucu kaydet veya güncelle", use_container_width=True,
-            disabled=bool(result_error) or (not match_started and not stored_result),
+            "Sonucu kaydet", use_container_width=True,
         )
     if submitted:
         save_error = save_match_result(
@@ -2277,17 +2260,6 @@ alter table public.match_results enable row level security;""",
         else:
             st.session_state["result_saved_message"] = True
             st.rerun()
-    if st.session_state.pop("result_saved_message", False):
-        st.success("Maç sonucu kaydedildi ve tahminler değerlendirildi.")
-
-    if stored_result:
-        comparison_frame = pd.DataFrame(evaluate_analysis(selected, stored_result))
-        comparison_frame["Durum"] = comparison_frame["Doğru"].map(
-            lambda correct: "✅ Doğru" if correct else "❌ Yanlış"
-        )
-        st.dataframe(
-            comparison_frame.drop(columns=["Doğru"]), use_container_width=True, hide_index=True
-        )
 
 
 def render_backtest_page(client: Client) -> None:
