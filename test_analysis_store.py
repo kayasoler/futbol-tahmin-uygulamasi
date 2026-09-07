@@ -10,6 +10,7 @@ from analysis_store import (
     match_snapshot,
     pending_manual_result_analyses,
     restore_report_snapshot,
+    save_match_result,
 )
 
 
@@ -101,6 +102,29 @@ class AnalysisStoreTests(unittest.TestCase):
         )
 
         self.assertEqual([row["match_key"] for row in pending], ["pending"])
+
+    def test_manual_result_requires_both_half_time_scores(self):
+        error = save_match_result(
+            None,
+            {"match_key": "a"},
+            full_time_home=2,
+            full_time_away=1,
+            half_time_home=1,
+        )
+
+        self.assertEqual(error, "İlk yarı skorunun iki takım için de girilmesi gerekir.")
+
+    def test_half_time_score_cannot_exceed_full_time_score(self):
+        error = save_match_result(
+            None,
+            {"match_key": "a"},
+            full_time_home=1,
+            full_time_away=1,
+            half_time_home=2,
+            half_time_away=0,
+        )
+
+        self.assertEqual(error, "İlk yarı skoru maç sonu skorundan büyük olamaz.")
 
 
 if __name__ == "__main__":

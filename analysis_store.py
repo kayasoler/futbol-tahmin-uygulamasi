@@ -250,16 +250,29 @@ def save_match_result(
     half_time_away: int | None = None,
     source: str = "manual",
 ) -> str | None:
+    full_home = int(full_time_home)
+    full_away = int(full_time_away)
+    half_home = None if half_time_home is None else int(half_time_home)
+    half_away = None if half_time_away is None else int(half_time_away)
+
+    if (half_home is None) != (half_away is None):
+        return "İlk yarı skorunun iki takım için de girilmesi gerekir."
+    if min(full_home, full_away, *(score for score in (half_home, half_away) if score is not None)) < 0:
+        return "Maç skorları negatif olamaz."
+    if half_home is not None and half_away is not None:
+        if half_home > full_home or half_away > full_away:
+            return "İlk yarı skoru maç sonu skorundan büyük olamaz."
+
     payload = {
         "match_key": str(analysis.get("match_key") or ""),
         "division": str(analysis.get("division") or ""),
         "match_date": str(analysis.get("match_date") or ""),
         "home_team": str(analysis.get("home_team") or ""),
         "away_team": str(analysis.get("away_team") or ""),
-        "full_time_home": int(full_time_home),
-        "full_time_away": int(full_time_away),
-        "half_time_home": None if half_time_home is None else int(half_time_home),
-        "half_time_away": None if half_time_away is None else int(half_time_away),
+        "full_time_home": full_home,
+        "full_time_away": full_away,
+        "half_time_home": half_home,
+        "half_time_away": half_away,
         "source": str(source or "manual"),
     }
     try:
