@@ -2221,6 +2221,11 @@ alter table public.match_results enable row level security;""",
     selected = latest_by_match[selected_key]
 
     st.markdown("#### Gerçek maç sonucu")
+    has_half_time = st.checkbox(
+        "İlk yarı skoru da mevcut",
+        value=False,
+        key=f"has_half_time_{selected_key}",
+    )
     with st.form(f"result_form_{selected_key}"):
         full_columns = st.columns(2)
         full_home = full_columns[0].number_input(
@@ -2230,9 +2235,6 @@ alter table public.match_results enable row level security;""",
         full_away = full_columns[1].number_input(
             f"MS · {selected.get('away_team')}", min_value=0, max_value=30,
             value=0, step=1,
-        )
-        has_half_time = st.checkbox(
-            "İlk yarı skoru da mevcut", value=False,
         )
         half_home = half_away = 0
         if has_half_time:
