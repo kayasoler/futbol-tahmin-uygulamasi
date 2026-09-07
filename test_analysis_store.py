@@ -1,4 +1,6 @@
 import unittest
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from analysis_store import (
     analysis_match_key,
@@ -6,6 +8,7 @@ from analysis_store import (
     evaluate_analysis,
     latest_analysis_versions,
     match_snapshot,
+    pending_manual_result_analyses,
     restore_report_snapshot,
 )
 
@@ -80,6 +83,24 @@ class AnalysisStoreTests(unittest.TestCase):
         ]
         latest = latest_analysis_versions(rows)
         self.assertEqual([(row["match_key"], row["version"]) for row in latest], [("a", 2), ("b", 1)])
+
+    def test_manual_result_list_contains_only_finished_matches_without_results(self):
+        analyses = [
+            {"match_key": "pending", "match_date": "2026-09-07", "kickoff_time": "18:00:00"},
+            {"match_key": "resolved", "match_date": "2026-09-07", "kickoff_time": "17:00:00"},
+            {"match_key": "playing", "match_date": "2026-09-07", "kickoff_time": "21:00:00"},
+            {"match_key": "future", "match_date": "2026-09-08", "kickoff_time": "18:00:00"},
+            {"match_key": "invalid", "match_date": "", "kickoff_time": ""},
+        ]
+        results = {"resolved": {"full_time_home": 2, "full_time_away": 1}}
+
+        pending = pending_manual_result_analyses(
+            analyses,
+            results,
+            datetime(2026, 9, 7, 22, 0, tzinfo=ZoneInfo("Europe/Istanbul")),
+        )
+
+        self.assertEqual([row["match_key"] for row in pending], ["pending"])
 
 
 if __name__ == "__main__":
