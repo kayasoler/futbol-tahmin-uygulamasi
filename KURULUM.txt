@@ -34,6 +34,9 @@ Onemli:
 - Geçmiş oranlar birebir eşitlik yerine marjı temizlenmiş ±1,5 / ±3 / ±5 puan olasılık toleransıyla karşılaştırılır.
 - Aşama 23 ile güncel fikstür ve oranlar anahtarsız Football-Data fixtures.csv dosyasından 6 saatlik önbellekle alınır.
 - Dünya Fikstürü açıldığında seçili günün kayıtlı analizleri yeniden hesaplanmadan otomatik yüklenir; bugün için kayıt yoksa analiz bir kez otomatik hazırlanır, diğer günler kullanıcı düğmesiyle hazırlanıp kaydedilir.
+- GitHub Actions günlük istatistiksel analiz görevini Türkiye saatiyle 06.00 ve 10.00'da çalıştırır. İlk çalışma günün maçlarını önceden kaydeder; ikinci çalışma yalnızca sonradan eklenen veya ilk turda eksik kalan maçları tamamlar.
+- Zamanlanmış görev için GitHub Actions Secrets alanına SUPABASE_URL ve SUPABASE_SERVICE_ROLE_KEY eklenmelidir. APP_PASSWORD, yapay zekâ ve kadro anahtarları bu göreve verilmez.
+- Zamanlanmış görev mevcut analiz sürümünü yenilemez; yeni sürüm yalnızca kullanıcı arayüzündeki açık yenileme işlemiyle oluşturulur.
 - Başlama tarihi veya saati geçen maçlar Dünya Fikstürü listesinden otomatik gizlenir.
 - Fikstür saatleri Europe/London yaz/kış saatinden Europe/Istanbul saatine çevrilir; oynanmış, tamamlanmış veya başlama saati geçmiş maçlar gösterilmez.
 - Fikstür ekranındaki desteklenen lig sorgusu taze Supabase bağlantısıyla iki kez denenir ve 6 saat önbelleğe alınır; geçici HTTP/2 bağlantı kapanması tüm ekranı çökertmez.
