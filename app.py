@@ -27,6 +27,7 @@ from backtest import aggregate_backtests, run_backtest
 from calibration import calibrate_model
 from analysis_store import (
     evaluate_analysis,
+    load_daily_analyses,
     load_analysis_history,
     load_latest_analysis,
     load_match_results,
@@ -40,8 +41,10 @@ from daily_fixture_analysis import (
     analyze_daily_fixture,
     build_analysis_evidence,
     fixture_table_row,
+    fixture_kickoff_has_passed,
     normalize_upcoming_fixture,
     resolve_fixture_duplicates,
+    stored_analysis_outcome,
 )
 from api_football import (
     fetch_bet365_odds,
@@ -1436,10 +1439,12 @@ def render_football_data_fixtures_page(client: Client) -> None:
     st.subheader("🌍 Dünya Fikstürü")
     st.write(
         "Football-Data.co.uk fikstürleri, manuel ve CSV maçları ayrı bölümlerde gösterilir. "
-        "İstatistiksel analiz toplu hazırlanır; haber/yapay zekâ ve kadro yalnızca "
-        "seçtiğiniz maçta çalışır."
+        "Bugünün kayıtlı analizleri açılışta otomatik gösterilir; kayıt yoksa bugünün "
+        "analizi bir kez hazırlanıp kaydedilir. Diğer günler yalnızca analiz düğmesiyle "
+        "hazırlanır. Haber/yapay zekâ ve kadro yalnızca seçtiğiniz maçta çalışır."
     )
-    today = datetime.now(ZoneInfo("Europe/Istanbul")).date()
+    now_istanbul = datetime.now(ZoneInfo("Europe/Istanbul"))
+    today = now_istanbul.date()
     if "last_manual_fixture" in st.session_state:
         st.success(st.session_state.pop("last_manual_fixture"))
     with st.expander("➕ Manuel maç ekle", expanded=False):
@@ -1493,6 +1498,32 @@ def render_football_data_fixtures_page(client: Client) -> None:
                         "Football-Data hâlâ erişilemiyor. CSV yedeği veya manuel kayıt "
                         "kullanabilirsiniz. " + str(exc)
                     )
+
+    current_result = st.session_state.get(result_key)
+    if not isinstance(current_result, dict) or current_result.get("date") != requested_date:
+        stored_analyses, stored_load_error = load_daily_analyses(client, requested_date)
+        stored_outcomes = [
+            outcome
+            for analysis in stored_analyses
+            if (outcome := stored_analysis_outcome(analysis)) is not None
+            and not fixture_kickoff_has_passed(outcome.get("fixture") or {}, now_istanbul)
+        ]
+        current_result = {
+            "date": requested_date,
+            "outcomes": stored_outcomes,
+            "duplicate_count": 0,
+            "source_warning": "",
+            "used_snapshot": False,
+            "football_data_count": 0,
+            "uploaded_count": 0,
+            "auto_loaded": True,
+            "load_error": stored_load_error or "",
+        }
+        st.session_state[result_key] = current_result
+        if requested_date == today.isoformat() and not stored_outcomes and not stored_load_error:
+            run_analysis = True
+            st.caption("Bugün için kayıtlı analiz bulunmadı; fikstür otomatik hazırlanıyor.")
+
     if run_analysis:
         try:
             stored_rows = fetch_fixture_rows_for_date(client, requested_date)
@@ -1534,6 +1565,10 @@ def render_football_data_fixtures_page(client: Client) -> None:
         fixtures, dropped = resolve_fixture_duplicates(
             football_data_rows + uploaded_rows + stored_rows
         )
+        fixtures = [
+            fixture for fixture in fixtures
+            if not fixture_kickoff_has_passed(fixture, now_istanbul)
+        ]
         outcomes: list[dict[str, object]] = []
         league_cache: dict[str, list[dict[str, object]]] = {}
         progress = st.progress(0, text="Maçlar istatistiksel olarak değerlendiriliyor...")
@@ -1555,6 +1590,9 @@ def render_football_data_fixtures_page(client: Client) -> None:
     if not isinstance(result, dict) or result.get("date") != requested_date:
         st.caption("Tarihi seçip analizi başlatın. Kayıtlı analizler otomatik yeniden hesaplanmaz.")
         return
+    if result.get("load_error"):
+        st.warning("Kayıtlı günlük analizler otomatik yüklenemedi.")
+        st.caption(str(result["load_error"]))
     if result.get("source_warning"):
         if result.get("used_snapshot"):
             snapshot_time = st.session_state.get(snapshot_time_key) or "zamanı bilinmiyor"
@@ -1579,12 +1617,25 @@ def render_football_data_fixtures_page(client: Client) -> None:
             f"{result['duplicate_count']} yinelenen maç tekilleştirildi. Öncelik sırası: "
             "manuel, yüklenen CSV, Football-Data."
         )
-    outcomes = list(result.get("outcomes") or [])
+    all_outcomes = list(result.get("outcomes") or [])
+    outcomes = [
+        outcome for outcome in all_outcomes
+        if not fixture_kickoff_has_passed(outcome.get("fixture") or {}, now_istanbul)
+    ]
+    hidden_count = len(all_outcomes) - len(outcomes)
+    if hidden_count:
+        st.caption(f"Başlama saati geçen {hidden_count} maç listeden kaldırıldı.")
     if not outcomes:
-        st.info(
-            "Seçilen gün için kullanılabilir maç bulunamadı. Football-Data kaynağını yenileyin "
-            "veya yukarıdan fixtures.csv yükleyin."
-        )
+        if result.get("auto_loaded"):
+            st.info(
+                "Seçilen gün için kayıtlı ve henüz başlamamış analiz bulunamadı. "
+                "Bu günü hazırlamak için analiz düğmesini kullanın."
+            )
+        else:
+            st.info(
+                "Seçilen gün için kullanılabilir maç bulunamadı. Football-Data kaynağını "
+                "yenileyin veya yukarıdan fixtures.csv yükleyin."
+            )
         return
     analyzable = [outcome for outcome in outcomes if outcome.get("report")]
     failed = [outcome for outcome in outcomes if not outcome.get("report")]
@@ -1594,7 +1645,10 @@ def render_football_data_fixtures_page(client: Client) -> None:
     metric_columns[2].metric("Analiz edilemedi", len(failed))
 
     selected_pair: tuple[int, dict[str, object]] | None = None
-    for source in ("football-data-live", "manual", "csv"):
+    source_order = ["football-data-live", "manual", "csv"]
+    if any(outcome.get("source") == "api-football" for outcome in analyzable):
+        source_order.append("api-football")
+    for source in source_order:
         indexed = [(index, outcome) for index, outcome in enumerate(outcomes) if outcome.get("report") and outcome.get("source") == source]
         st.markdown(f"#### {SOURCE_LABELS[source]}")
         if not indexed:

@@ -1,17 +1,50 @@
 import unittest
+from datetime import datetime
 from unittest.mock import patch
 
 from daily_fixture_analysis import (
     analyze_daily_fixture,
     fixture_table_row,
+    fixture_kickoff_has_passed,
     normalize_upcoming_fixture,
     prepare_api_fixture_for_analysis,
     prepare_fixture_match,
     resolve_fixture_duplicates,
+    stored_analysis_outcome,
 )
 
 
 class DailyFixtureAnalysisTests(unittest.TestCase):
+    def test_hides_only_fixtures_whose_kickoff_has_passed(self):
+        now = datetime(2026, 9, 7, 19, 0)
+        self.assertTrue(fixture_kickoff_has_passed(
+            {"match_date": "2026-09-07", "kickoff_time": "18:59:00"}, now
+        ))
+        self.assertFalse(fixture_kickoff_has_passed(
+            {"match_date": "2026-09-07", "kickoff_time": "19:01:00"}, now
+        ))
+        self.assertTrue(fixture_kickoff_has_passed(
+            {"match_date": "2026-09-06", "kickoff_time": "23:59:00"}, now
+        ))
+
+    def test_restores_saved_analysis_as_daily_outcome(self):
+        analysis = {
+            "id": 7,
+            "match_key": "key",
+            "version": 2,
+            "division": "E0",
+            "match_date": "2026-09-07",
+            "kickoff_time": "20:00:00",
+            "home_team": "Arsenal",
+            "away_team": "Chelsea",
+            "match_snapshot": {"entry_method": "football-data-live"},
+            "report_snapshot": {"predictions": {"ms": "MS 1"}},
+        }
+        outcome = stored_analysis_outcome(analysis)
+        self.assertEqual(outcome["status"], "Kayıtlı analiz")
+        self.assertEqual(outcome["fixture"]["home_team"], "Arsenal")
+        self.assertEqual(outcome["source"], "football-data-live")
+
     def test_manual_duplicate_wins_over_football_data(self):
         common = {
             "division": "E0", "match_date": "2026-09-06",

@@ -155,6 +155,48 @@ def load_analysis_history(client, limit: int = 300) -> tuple[list[dict[str, Any]
         return [], str(exc)
 
 
+def latest_analysis_versions(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep only the newest stored version of every match."""
+    latest: dict[str, dict[str, Any]] = {}
+    for original in rows:
+        row = dict(original)
+        match_key = str(row.get("match_key") or "")
+        if not match_key:
+            continue
+        current = latest.get(match_key)
+        if current is None or int(row.get("version") or 0) > int(current.get("version") or 0):
+            latest[match_key] = row
+    return sorted(
+        latest.values(),
+        key=lambda row: (
+            str(row.get("kickoff_time") or ""),
+            str(row.get("home_team") or ""),
+        ),
+    )
+
+
+def load_daily_analyses(
+    client, match_date: str, limit: int = 1000
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Load the latest immutable analysis snapshot for each match on one day."""
+    try:
+        response = (
+            client.table("match_analyses")
+            .select(
+                "id,match_key,version,division,match_date,kickoff_time,home_team,"
+                "away_team,analyzed_at,match_snapshot,report_snapshot,external_context,"
+                "gemini_result"
+            )
+            .eq("match_date", str(match_date))
+            .order("version", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return latest_analysis_versions([dict(row) for row in (response.data or [])]), None
+    except Exception as exc:
+        return [], str(exc)
+
+
 def load_match_results(client, limit: int = 500) -> tuple[dict[str, dict[str, Any]], str | None]:
     try:
         response = (
