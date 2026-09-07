@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 import hashlib
 import json
 import re
@@ -210,6 +210,34 @@ def load_match_results(client, limit: int = 500) -> tuple[dict[str, dict[str, An
         return {str(row["match_key"]): row for row in rows}, None
     except Exception as exc:
         return {}, str(exc)
+
+
+def pending_manual_result_analyses(
+    analyses: list[dict[str, Any]],
+    results: dict[str, dict[str, Any]],
+    now: datetime,
+    *,
+    expected_match_duration: timedelta = timedelta(hours=2, minutes=30),
+) -> list[dict[str, Any]]:
+    """Return only finished analyses whose result still needs manual entry."""
+    pending: list[dict[str, Any]] = []
+    for analysis in analyses:
+        match_key = str(analysis.get("match_key") or "")
+        if not match_key or match_key in results:
+            continue
+        try:
+            match_date = datetime.fromisoformat(str(analysis.get("match_date"))).date()
+            kickoff_time = time.fromisoformat(
+                str(analysis.get("kickoff_time") or "23:59:59")[:8]
+            )
+            expected_finish = datetime.combine(
+                match_date, kickoff_time, tzinfo=now.tzinfo
+            ) + expected_match_duration
+        except (TypeError, ValueError):
+            continue
+        if expected_finish <= now:
+            pending.append(analysis)
+    return pending
 
 
 def save_match_result(
