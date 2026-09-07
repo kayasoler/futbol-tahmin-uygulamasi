@@ -4,6 +4,7 @@ from analysis_store import (
     analysis_match_key,
     compact_report,
     evaluate_analysis,
+    latest_analysis_versions,
     match_snapshot,
     restore_report_snapshot,
 )
@@ -70,6 +71,15 @@ class AnalysisStoreTests(unittest.TestCase):
 
         self.assertEqual(len(rows), 5)
         self.assertTrue(all(row["Doğru"] for row in rows))
+
+    def test_daily_loader_keeps_latest_version_per_match(self):
+        rows = [
+            {"match_key": "a", "version": 1, "kickoff_time": "18:00"},
+            {"match_key": "a", "version": 2, "kickoff_time": "18:00"},
+            {"match_key": "b", "version": 1, "kickoff_time": "20:00"},
+        ]
+        latest = latest_analysis_versions(rows)
+        self.assertEqual([(row["match_key"], row["version"]) for row in latest], [("a", 2), ("b", 1)])
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from datetime import date, datetime, time
 from typing import Any
 
 from analysis import (
@@ -40,6 +41,48 @@ ODDS_FIELDS = (
 def source_key(fixture: dict[str, Any]) -> str:
     method = str(fixture.get("entry_method") or "csv").strip().casefold()
     return method if method in SOURCE_LABELS else "csv"
+
+
+def fixture_kickoff_has_passed(fixture: dict[str, Any], now: datetime) -> bool:
+    """Return true only when a fixture's local kickoff can be proven to have passed."""
+    try:
+        match_date = date.fromisoformat(str(fixture.get("match_date") or "")[:10])
+    except ValueError:
+        return False
+    if match_date < now.date():
+        return True
+    if match_date > now.date():
+        return False
+    kickoff_text = str(fixture.get("kickoff_time") or "").strip()
+    try:
+        kickoff = time.fromisoformat(kickoff_text[:8])
+    except ValueError:
+        return False
+    current_time = now.timetz().replace(tzinfo=None) if now.tzinfo else now.time()
+    return kickoff <= current_time
+
+
+def stored_analysis_outcome(analysis: dict[str, Any]) -> dict[str, Any] | None:
+    """Adapt one durable analysis row to the daily fixture screen without recalculation."""
+    report = restore_report_snapshot(analysis)
+    if not report:
+        return None
+    match = dict(analysis.get("match_snapshot") or {})
+    for key in (
+        "division", "match_date", "kickoff_time", "home_team", "away_team"
+    ):
+        if not match.get(key):
+            match[key] = analysis.get(key)
+    match["entry_method"] = source_key(match)
+    return {
+        "fixture": dict(match),
+        "analysis_match": dict(match),
+        "analysis_record": dict(analysis),
+        "report": report,
+        "status": "Kayıtlı analiz",
+        "reason": "",
+        "source": source_key(match),
+    }
 
 
 def _identity_text(value: Any) -> str:

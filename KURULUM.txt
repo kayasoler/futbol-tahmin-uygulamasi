@@ -33,6 +33,8 @@ Onemli:
 - Manuel açılış alanları 1-X-2 ile birlikte Bet365 2.5 Üst/Alt oranlarını da kabul eder ve iki piyasanın hareketini marjdan arındırarak gösterir.
 - Geçmiş oranlar birebir eşitlik yerine marjı temizlenmiş ±1,5 / ±3 / ±5 puan olasılık toleransıyla karşılaştırılır.
 - Aşama 23 ile güncel fikstür ve oranlar anahtarsız Football-Data fixtures.csv dosyasından 6 saatlik önbellekle alınır.
+- Dünya Fikstürü açıldığında seçili günün kayıtlı analizleri yeniden hesaplanmadan otomatik yüklenir; bugün için kayıt yoksa analiz bir kez otomatik hazırlanır, diğer günler kullanıcı düğmesiyle hazırlanıp kaydedilir.
+- Başlama tarihi veya saati geçen maçlar Dünya Fikstürü listesinden otomatik gizlenir.
 - Fikstür saatleri Europe/London yaz/kış saatinden Europe/Istanbul saatine çevrilir; oynanmış, tamamlanmış veya başlama saati geçmiş maçlar gösterilmez.
 - Fikstür ekranındaki desteklenen lig sorgusu taze Supabase bağlantısıyla iki kez denenir ve 6 saat önbelleğe alınır; geçici HTTP/2 bağlantı kapanması tüm ekranı çökertmez.
 - HIGHLIGHTLY_API_KEY varsa yalnızca seçilen maçta düğmeye basıldığında son beş form, puan durumu ve maç saatine yakın kadro alınır; bu bölüm API-Football kotasını kullanmaz.
