@@ -15,6 +15,8 @@ RESULT_ODDS_COLUMNS = {"1": "b365_home", "X": "b365_draw", "2": "b365_away"}
 VALUE_THRESHOLDS = (0.00, 0.03, 0.05, 0.10)
 MS_PROBABILITY_THRESHOLDS = (0.45, 0.50, 0.55, 0.60, 0.62, 0.65, 0.70)
 MS_MARGIN_THRESHOLDS = (0.00, 0.08, 0.12, 0.18, 0.20)
+DRAW_PROBABILITY_THRESHOLDS = (0.18, 0.20, 0.22, 0.24, 0.26, 0.28, 0.30)
+DRAW_MAX_DEFICITS = (0.02, 0.04, 0.06, 0.08, 0.10, 0.12, 0.15)
 
 
 def _number(value: Any) -> float | None:
@@ -138,6 +140,38 @@ def _wilson_lower_bound(correct: int, total: int, z: float = 1.96) -> float:
     return (centre - spread) / denominator
 
 
+def _temporal_train_holdout(
+    records: list[dict[str, Any]], train_ratio: float
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split each league chronologically without dividing a match date."""
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for record in records:
+        grouped[str(record.get("division") or "Bilinmeyen")].append(record)
+
+    training: list[dict[str, Any]] = []
+    holdout: list[dict[str, Any]] = []
+    for division_records in grouped.values():
+        ordered = sorted(division_records, key=lambda row: str(row.get("date") or ""))
+        if len(ordered) < 2:
+            continue
+        target_split = min(
+            len(ordered) - 1,
+            max(1, int(len(ordered) * train_ratio)),
+        )
+        valid_splits = [
+            index
+            for index in range(1, len(ordered))
+            if str(ordered[index - 1].get("date") or "")
+            != str(ordered[index].get("date") or "")
+        ]
+        if not valid_splits:
+            continue
+        split = min(valid_splits, key=lambda index: abs(index - target_split))
+        training.extend(ordered[:split])
+        holdout.extend(ordered[split:])
+    return training, holdout
+
+
 def _threshold_performance(
     records: list[dict[str, Any]],
     probability_threshold: float,
@@ -176,31 +210,7 @@ def ms_threshold_diagnostics(
     minimum_training_bets: int = 30,
 ) -> dict[str, Any]:
     """Choose an MS filter on older matches and report it on untouched newer matches."""
-    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for record in records:
-        grouped[str(record.get("division") or "Bilinmeyen")].append(record)
-
-    training: list[dict[str, Any]] = []
-    holdout: list[dict[str, Any]] = []
-    for division_records in grouped.values():
-        ordered = sorted(division_records, key=lambda row: str(row.get("date") or ""))
-        if len(ordered) < 2:
-            continue
-        target_split = min(
-            len(ordered) - 1,
-            max(1, int(len(ordered) * train_ratio)),
-        )
-        valid_splits = [
-            index
-            for index in range(1, len(ordered))
-            if str(ordered[index - 1].get("date") or "")
-            != str(ordered[index].get("date") or "")
-        ]
-        if not valid_splits:
-            continue
-        split = min(valid_splits, key=lambda index: abs(index - target_split))
-        training.extend(ordered[:split])
-        holdout.extend(ordered[split:])
+    training, holdout = _temporal_train_holdout(records, train_ratio)
 
     rows: list[dict[str, Any]] = []
     for probability_threshold in MS_PROBABILITY_THRESHOLDS:
@@ -256,6 +266,177 @@ def ms_threshold_diagnostics(
             if selected is not None
             else None
         ),
+    }
+
+
+def _draw_rule_performance(
+    records: list[dict[str, Any]],
+    probability_threshold: float,
+    maximum_deficit: float,
+) -> dict[str, Any]:
+    correct = 0
+    overrides = 0
+    draw_predictions = 0
+    draw_correct = 0
+    actual_draws = 0
+    priced_bets = 0
+    net = 0.0
+    evaluated = 0
+
+    for record in records:
+        probabilities = record.get("probabilities") or {}
+        parsed = {
+            label: _number(probabilities.get(label))
+            for label in RESULT_ODDS_COLUMNS
+        }
+        if any(value is None for value in parsed.values()):
+            continue
+        total = sum(float(value) for value in parsed.values())
+        if total <= 0:
+            continue
+        normalized = {label: float(value) / total for label, value in parsed.items()}
+        base_prediction = str(record.get("predicted") or "")
+        actual = str(record.get("actual") or "")
+        if base_prediction not in RESULT_ODDS_COLUMNS or actual not in RESULT_ODDS_COLUMNS:
+            continue
+        evaluated += 1
+        draw_deficit = max(normalized["1"], normalized["2"]) - normalized["X"]
+        prediction = base_prediction
+        if (
+            normalized["X"] >= probability_threshold
+            and draw_deficit <= maximum_deficit
+        ):
+            prediction = "X"
+
+        is_correct = prediction == actual
+        correct += int(is_correct)
+        overrides += int(prediction != base_prediction)
+        draw_predictions += int(prediction == "X")
+        draw_correct += int(prediction == "X" and actual == "X")
+        actual_draws += int(actual == "X")
+
+        odds = _number((record.get("odds_by_result") or {}).get(prediction))
+        if odds is not None and odds > 1:
+            priced_bets += 1
+            net += STAKE * (odds - 1) if is_correct else -STAKE
+
+    return {
+        "matches": evaluated,
+        "correct": correct,
+        "accuracy": correct / evaluated if evaluated else None,
+        "overrides": overrides,
+        "draw_predictions": draw_predictions,
+        "draw_correct": draw_correct,
+        "draw_recall": draw_correct / actual_draws if actual_draws else None,
+        "draw_precision": draw_correct / draw_predictions if draw_predictions else None,
+        "priced_bets": priced_bets,
+        "roi": net / (priced_bets * STAKE) if priced_bets else None,
+    }
+
+
+def ms_draw_rule_diagnostics(
+    records: list[dict[str, Any]],
+    *,
+    train_ratio: float = 0.70,
+    minimum_training_overrides: int = 20,
+) -> dict[str, Any]:
+    """Test draw overrides on old matches and score one candidate on newer matches."""
+    training, holdout = _temporal_train_holdout(records, train_ratio)
+    baseline_train = _draw_rule_performance(training, 2.0, -1.0)
+    baseline_holdout = _draw_rule_performance(holdout, 2.0, -1.0)
+    required = max(
+        minimum_training_overrides,
+        math.ceil(len(training) * 0.01),
+    )
+
+    rows: list[dict[str, Any]] = []
+    for probability_threshold in DRAW_PROBABILITY_THRESHOLDS:
+        for maximum_deficit in DRAW_MAX_DEFICITS:
+            train = _draw_rule_performance(
+                training, probability_threshold, maximum_deficit
+            )
+            test = _draw_rule_performance(
+                holdout, probability_threshold, maximum_deficit
+            )
+            train_accuracy = train["accuracy"]
+            test_accuracy = test["accuracy"]
+            rows.append(
+                {
+                    "X olasılık eşiği": probability_threshold,
+                    "X azami fark": maximum_deficit,
+                    "Eğitim X müdahale": train["overrides"],
+                    "Eğitim doğruluk": train_accuracy,
+                    "Eğitim doğruluk farkı": (
+                        train_accuracy - baseline_train["accuracy"]
+                        if train_accuracy is not None
+                        and baseline_train["accuracy"] is not None
+                        else None
+                    ),
+                    "Yeni %30 X müdahale": test["overrides"],
+                    "Yeni %30 doğruluk": test_accuracy,
+                    "Yeni %30 doğruluk farkı": (
+                        test_accuracy - baseline_holdout["accuracy"]
+                        if test_accuracy is not None
+                        and baseline_holdout["accuracy"] is not None
+                        else None
+                    ),
+                    "Yeni %30 X yakalama": test["draw_recall"],
+                    "Yeni %30 X kesinlik": test["draw_precision"],
+                    "Yeni %30 X tahmini": test["draw_predictions"],
+                    "Yeni %30 oranlı maç": test["priced_bets"],
+                    "Yeni %30 ROI": test["roi"],
+                    "selected": False,
+                    "_train_draw_recall": train["draw_recall"] or 0.0,
+                }
+            )
+
+    eligible = [
+        row
+        for row in rows
+        if int(row["Eğitim X müdahale"]) >= required
+    ]
+    selected = max(
+        eligible,
+        key=lambda row: (
+            float(row["Eğitim doğruluk"] or 0),
+            float(row["_train_draw_recall"]),
+            -int(row["Eğitim X müdahale"]),
+            float(row["X olasılık eşiği"]),
+            -float(row["X azami fark"]),
+        ),
+        default=None,
+    )
+    if selected is not None:
+        selected["selected"] = True
+
+    public_rows = [
+        {key: value for key, value in row.items() if key != "_train_draw_recall"}
+        for row in rows
+    ]
+    public_selected = (
+        {
+            key: value
+            for key, value in selected.items()
+            if key != "_train_draw_recall"
+        }
+        if selected is not None
+        else None
+    )
+    return {
+        "training_count": len(training),
+        "holdout_count": len(holdout),
+        "minimum_training_overrides": required,
+        "baseline": {
+            "Eğitim doğruluk": baseline_train["accuracy"],
+            "Yeni %30 doğruluk": baseline_holdout["accuracy"],
+            "Yeni %30 X yakalama": baseline_holdout["draw_recall"],
+            "Yeni %30 X kesinlik": baseline_holdout["draw_precision"],
+            "Yeni %30 X tahmini": baseline_holdout["draw_predictions"],
+            "Yeni %30 oranlı maç": baseline_holdout["priced_bets"],
+            "Yeni %30 ROI": baseline_holdout["roi"],
+        },
+        "rows": public_rows,
+        "selected": public_selected,
     }
 
 
@@ -398,12 +579,12 @@ def run_backtest(
                 float(value) for value in parsed_probabilities.values()
             )
             if probability_total > 0:
+                normalized_by_result = {
+                    result_code: float(value) / probability_total
+                    for result_code, value in parsed_probabilities.items()
+                }
                 normalized_probabilities = sorted(
-                    (
-                        float(value) / probability_total
-                        for value in parsed_probabilities.values()
-                    ),
-                    reverse=True,
+                    normalized_by_result.values(), reverse=True
                 )
                 ms_diagnostics.append(
                     {
@@ -414,6 +595,11 @@ def run_backtest(
                         "max_probability": normalized_probabilities[0],
                         "margin": normalized_probabilities[0] - normalized_probabilities[1],
                         "odds": model_odds,
+                        "probabilities": normalized_by_result,
+                        "odds_by_result": {
+                            result_code: _number(target.get(odds_column))
+                            for result_code, odds_column in RESULT_ODDS_COLUMNS.items()
+                        },
                         "correct": ms_is_correct,
                     }
                 )
@@ -638,6 +824,7 @@ def run_backtest(
         "ms_diagnostics": ms_diagnostics,
         "ms_confusion": ms_confusion_rows(ms_diagnostics),
         "ms_threshold_diagnostics": ms_threshold_diagnostics(ms_diagnostics),
+        "ms_draw_rule_diagnostics": ms_draw_rule_diagnostics(ms_diagnostics),
         "calibration_records": calibration_records,
         "details": list(reversed(details)),
         "note": (
@@ -807,6 +994,9 @@ def aggregate_backtests(
         "ms_diagnostics": combined_ms_diagnostics,
         "ms_confusion": ms_confusion_rows(combined_ms_diagnostics),
         "ms_threshold_diagnostics": ms_threshold_diagnostics(
+            combined_ms_diagnostics
+        ),
+        "ms_draw_rule_diagnostics": ms_draw_rule_diagnostics(
             combined_ms_diagnostics
         ),
         "league_summary": league_summary,
