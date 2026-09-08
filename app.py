@@ -2441,6 +2441,75 @@ def render_backtest_page(client: Client) -> None:
         )
         st.dataframe(comparison_frame, use_container_width=True, hide_index=True)
 
+    confusion_frame = pd.DataFrame(result.get("ms_confusion") or [])
+    if not confusion_frame.empty:
+        confusion_frame["Doğru oran"] = confusion_frame["Doğru oran"].map(
+            lambda value: f"{float(value) * 100:.1f}%"
+        )
+        st.markdown("#### MS 1/X/2 hata matrisi")
+        st.caption(
+            "Her satır gerçek sonucu, Tahmin 1/X/2 sütunları modelin o maçlarda "
+            "hangi sonucu seçtiğini gösterir."
+        )
+        st.dataframe(confusion_frame, use_container_width=True, hide_index=True)
+
+    threshold_diagnostics = result.get("ms_threshold_diagnostics") or {}
+    threshold_rows = pd.DataFrame(threshold_diagnostics.get("rows") or [])
+    selected_threshold = threshold_diagnostics.get("selected")
+    if not threshold_rows.empty:
+        st.markdown("#### MS sayısal güven eşiği taraması")
+        st.caption(
+            "Eşik eski %70 maçta seçilir; gösterilen yeni %30 sonucu seçim sırasında "
+            "kullanılmayan daha yeni maçlardan gelir. Bu teşhis canlı modeli değiştirmez."
+        )
+        if isinstance(selected_threshold, dict):
+            selected_accuracy = selected_threshold.get("Yeni %30 doğruluk")
+            selected_roi = selected_threshold.get("Yeni %30 ROI")
+            selected_accuracy_text = (
+                f"%{float(selected_accuracy) * 100:.1f}"
+                if selected_accuracy is not None
+                else "—"
+            )
+            selected_roi_text = (
+                f"%{float(selected_roi) * 100:+.1f}"
+                if selected_roi is not None
+                else "—"
+            )
+            st.info(
+                f"Eski %70 bölümünün istatistiksel adayı: en az "
+                f"%{float(selected_threshold['Olasılık eşiği']) * 100:.0f} olasılık ve "
+                f"%{float(selected_threshold['Fark eşiği']) * 100:.0f} ilk-ikinci farkı. "
+                f"Yeni %30: {int(selected_threshold['Yeni %30 seçim'])} seçim, "
+                f"doğruluk {selected_accuracy_text}, ROI {selected_roi_text}."
+            )
+
+        threshold_rows["Aday"] = threshold_rows["selected"].map(
+            lambda value: "✓" if value else ""
+        )
+        threshold_rows = threshold_rows.drop(columns=["selected"])
+        for column in (
+            "Olasılık eşiği",
+            "Fark eşiği",
+            "Eğitim doğruluğu",
+            "Yeni %30 kapsama",
+            "Yeni %30 doğruluk",
+            "Yeni %30 ROI",
+        ):
+            threshold_rows[column] = threshold_rows[column].map(
+                lambda value: (
+                    "—"
+                    if value is None or pd.isna(value)
+                    else f"%{float(value) * 100:+.1f}"
+                    if column == "Yeni %30 ROI"
+                    else f"%{float(value) * 100:.1f}"
+                )
+            )
+        threshold_rows = threshold_rows[
+            ["Aday", *[column for column in threshold_rows.columns if column != "Aday"]]
+        ]
+        with st.expander("Tüm olasılık ve fark eşiklerini göster"):
+            st.dataframe(threshold_rows, use_container_width=True, hide_index=True)
+
     value_frame = pd.DataFrame(result.get("value_metrics") or [])
     if not value_frame.empty:
         value_frame = value_frame.drop(columns=["Eşik"], errors="ignore")

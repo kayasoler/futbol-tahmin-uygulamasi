@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+import math
 from typing import Any, Callable
 
 import pandas as pd
@@ -12,6 +13,8 @@ ProgressCallback = Callable[[int, int], None]
 STAKE = 100.0
 RESULT_ODDS_COLUMNS = {"1": "b365_home", "X": "b365_draw", "2": "b365_away"}
 VALUE_THRESHOLDS = (0.00, 0.03, 0.05, 0.10)
+MS_PROBABILITY_THRESHOLDS = (0.45, 0.50, 0.55, 0.60, 0.62, 0.65, 0.70)
+MS_MARGIN_THRESHOLDS = (0.00, 0.08, 0.12, 0.18, 0.20)
 
 
 def _number(value: Any) -> float | None:
@@ -98,6 +101,164 @@ def _record_bet(group: dict[str, float], odds: float, won: bool) -> float:
     return net
 
 
+def ms_confusion_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Show where 1-X-2 predictions are confused with each actual outcome."""
+    counts: Counter[tuple[str, str]] = Counter()
+    for record in records:
+        actual = str(record.get("actual") or "")
+        predicted = str(record.get("predicted") or "")
+        if actual in RESULT_ODDS_COLUMNS and predicted in RESULT_ODDS_COLUMNS:
+            counts[(actual, predicted)] += 1
+
+    rows: list[dict[str, Any]] = []
+    for actual in RESULT_ODDS_COLUMNS:
+        total = sum(counts[(actual, predicted)] for predicted in RESULT_ODDS_COLUMNS)
+        if not total:
+            continue
+        rows.append(
+            {
+                "Gerçek sonuç": actual,
+                "Tahmin 1": counts[(actual, "1")],
+                "Tahmin X": counts[(actual, "X")],
+                "Tahmin 2": counts[(actual, "2")],
+                "Toplam": total,
+                "Doğru oran": counts[(actual, actual)] / total,
+            }
+        )
+    return rows
+
+
+def _wilson_lower_bound(correct: int, total: int, z: float = 1.96) -> float:
+    if total <= 0:
+        return 0.0
+    rate = correct / total
+    denominator = 1 + z * z / total
+    centre = rate + z * z / (2 * total)
+    spread = z * math.sqrt((rate * (1 - rate) + z * z / (4 * total)) / total)
+    return (centre - spread) / denominator
+
+
+def _threshold_performance(
+    records: list[dict[str, Any]],
+    probability_threshold: float,
+    margin_threshold: float,
+) -> dict[str, Any]:
+    selected = [
+        record
+        for record in records
+        if float(record.get("max_probability") or 0) >= probability_threshold
+        and float(record.get("margin") or 0) >= margin_threshold
+    ]
+    correct = sum(bool(record.get("correct")) for record in selected)
+    priced = [
+        record
+        for record in selected
+        if (_number(record.get("odds")) or 0) > 1
+    ]
+    net = sum(
+        STAKE * (float(record["odds"]) - 1) if record.get("correct") else -STAKE
+        for record in priced
+    )
+    return {
+        "bets": len(selected),
+        "correct": correct,
+        "accuracy": correct / len(selected) if selected else None,
+        "coverage": len(selected) / len(records) if records else None,
+        "priced_bets": len(priced),
+        "roi": net / (len(priced) * STAKE) if priced else None,
+    }
+
+
+def ms_threshold_diagnostics(
+    records: list[dict[str, Any]],
+    *,
+    train_ratio: float = 0.70,
+    minimum_training_bets: int = 30,
+) -> dict[str, Any]:
+    """Choose an MS filter on older matches and report it on untouched newer matches."""
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for record in records:
+        grouped[str(record.get("division") or "Bilinmeyen")].append(record)
+
+    training: list[dict[str, Any]] = []
+    holdout: list[dict[str, Any]] = []
+    for division_records in grouped.values():
+        ordered = sorted(division_records, key=lambda row: str(row.get("date") or ""))
+        if len(ordered) < 2:
+            continue
+        target_split = min(
+            len(ordered) - 1,
+            max(1, int(len(ordered) * train_ratio)),
+        )
+        valid_splits = [
+            index
+            for index in range(1, len(ordered))
+            if str(ordered[index - 1].get("date") or "")
+            != str(ordered[index].get("date") or "")
+        ]
+        if not valid_splits:
+            continue
+        split = min(valid_splits, key=lambda index: abs(index - target_split))
+        training.extend(ordered[:split])
+        holdout.extend(ordered[split:])
+
+    rows: list[dict[str, Any]] = []
+    for probability_threshold in MS_PROBABILITY_THRESHOLDS:
+        for margin_threshold in MS_MARGIN_THRESHOLDS:
+            train = _threshold_performance(
+                training, probability_threshold, margin_threshold
+            )
+            test = _threshold_performance(
+                holdout, probability_threshold, margin_threshold
+            )
+            rows.append(
+                {
+                    "Olasılık eşiği": probability_threshold,
+                    "Fark eşiği": margin_threshold,
+                    "Eğitim seçimi": train["bets"],
+                    "Eğitim doğruluğu": train["accuracy"],
+                    "Yeni %30 seçim": test["bets"],
+                    "Yeni %30 kapsama": test["coverage"],
+                    "Yeni %30 doğruluk": test["accuracy"],
+                    "Oranlı seçim": test["priced_bets"],
+                    "Yeni %30 ROI": test["roi"],
+                    "selected": False,
+                    "_wilson": _wilson_lower_bound(train["correct"], train["bets"]),
+                }
+            )
+
+    required = max(minimum_training_bets, math.ceil(len(training) * 0.05))
+    eligible = [row for row in rows if int(row["Eğitim seçimi"]) >= required]
+    selected = max(
+        eligible,
+        key=lambda row: (
+            float(row["_wilson"]),
+            float(row["Eğitim doğruluğu"] or 0),
+            int(row["Eğitim seçimi"]),
+            -float(row["Olasılık eşiği"]),
+            -float(row["Fark eşiği"]),
+        ),
+        default=None,
+    )
+    if selected is not None:
+        selected["selected"] = True
+
+    return {
+        "training_count": len(training),
+        "holdout_count": len(holdout),
+        "minimum_training_bets": required,
+        "rows": [
+            {key: value for key, value in row.items() if key != "_wilson"}
+            for row in rows
+        ],
+        "selected": (
+            {key: value for key, value in selected.items() if key != "_wilson"}
+            if selected is not None
+            else None
+        ),
+    }
+
+
 def _model_match(row: dict[str, Any]) -> dict[str, Any]:
     """Remove the answer fields before asking the model for a prediction."""
     hidden = {
@@ -161,6 +322,7 @@ def run_backtest(
     value_groups = {threshold: _empty_bet_group() for threshold in VALUE_THRESHOLDS}
     details: list[dict[str, Any]] = []
     calibration_records: list[dict[str, Any]] = []
+    ms_diagnostics: list[dict[str, Any]] = []
 
     for position, (target_date, target) in enumerate(targets, start=1):
         history = [row for row_date, row in dated_rows if row_date < target_date]
@@ -227,6 +389,34 @@ def run_backtest(
                 )
 
         probabilities = predictions.get("ms_probabilities") or {}
+        parsed_probabilities = {
+            result_code: _number(probabilities.get(result_code))
+            for result_code in RESULT_ODDS_COLUMNS
+        }
+        if all(value is not None for value in parsed_probabilities.values()):
+            probability_total = sum(
+                float(value) for value in parsed_probabilities.values()
+            )
+            if probability_total > 0:
+                normalized_probabilities = sorted(
+                    (
+                        float(value) / probability_total
+                        for value in parsed_probabilities.values()
+                    ),
+                    reverse=True,
+                )
+                ms_diagnostics.append(
+                    {
+                        "date": str(target.get("match_date") or ""),
+                        "division": str(target.get("division") or ""),
+                        "predicted": predicted_ms,
+                        "actual": actual_ms,
+                        "max_probability": normalized_probabilities[0],
+                        "margin": normalized_probabilities[0] - normalized_probabilities[1],
+                        "odds": model_odds,
+                        "correct": ms_is_correct,
+                    }
+                )
         value_candidates: list[tuple[float, str, float]] = []
         for result_code, odds_column in RESULT_ODDS_COLUMNS.items():
             probability = _number(probabilities.get(result_code))
@@ -445,6 +635,9 @@ def run_backtest(
         "comparisons": comparisons,
         "profit_metrics": profit_metrics,
         "value_metrics": value_metrics,
+        "ms_diagnostics": ms_diagnostics,
+        "ms_confusion": ms_confusion_rows(ms_diagnostics),
+        "ms_threshold_diagnostics": ms_threshold_diagnostics(ms_diagnostics),
         "calibration_records": calibration_records,
         "details": list(reversed(details)),
         "note": (
@@ -469,8 +662,10 @@ def aggregate_backtests(
     combined_profit: dict[str, dict[str, float]] = defaultdict(_empty_bet_group)
     combined_value = {threshold: _empty_bet_group() for threshold in VALUE_THRESHOLDS}
     league_summary: list[dict[str, Any]] = []
+    combined_ms_diagnostics: list[dict[str, Any]] = []
 
     for division, result in league_results:
+        combined_ms_diagnostics.extend(result.get("ms_diagnostics") or [])
         for row in result.get("metrics") or []:
             item = combined_metrics[str(row["Ölçüm"])]
             item["correct"] += float(row["Doğru"])
@@ -609,6 +804,11 @@ def aggregate_backtests(
         "metrics": metrics,
         "profit_metrics": profit_metrics,
         "value_metrics": value_metrics,
+        "ms_diagnostics": combined_ms_diagnostics,
+        "ms_confusion": ms_confusion_rows(combined_ms_diagnostics),
+        "ms_threshold_diagnostics": ms_threshold_diagnostics(
+            combined_ms_diagnostics
+        ),
         "league_summary": league_summary,
         "calibration_leagues": [
             {
