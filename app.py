@@ -2510,6 +2510,129 @@ def render_backtest_page(client: Client) -> None:
         with st.expander("Tüm olasılık ve fark eşiklerini göster"):
             st.dataframe(threshold_rows, use_container_width=True, hide_index=True)
 
+    draw_diagnostics = result.get("ms_draw_rule_diagnostics") or {}
+    draw_rows = pd.DataFrame(draw_diagnostics.get("rows") or [])
+    selected_draw_rule = draw_diagnostics.get("selected")
+    draw_baseline = draw_diagnostics.get("baseline") or {}
+    if not draw_rows.empty:
+        st.markdown("#### MS beraberlik karar kuralı testi")
+        st.caption(
+            "Modelin neredeyse hiç X seçmemesini ölçer. Kural eski %70 maçta seçilir "
+            "ve yalnızca daha yeni %30 maçta mevcut modelle karşılaştırılır; canlı "
+            "tahminler değişmez."
+        )
+
+        if isinstance(selected_draw_rule, dict):
+            accuracy_delta = selected_draw_rule.get("Yeni %30 doğruluk farkı")
+            training_delta = selected_draw_rule.get("Eğitim doğruluk farkı")
+            draw_recall = selected_draw_rule.get("Yeni %30 X yakalama")
+            roi = selected_draw_rule.get("Yeni %30 ROI")
+            draw_recall_text = (
+                f"%{float(draw_recall) * 100:.1f}"
+                if draw_recall is not None
+                else "—"
+            )
+            accuracy_delta_text = (
+                f"%{float(accuracy_delta) * 100:+.1f}"
+                if accuracy_delta is not None
+                else "—"
+            )
+            roi_text = (
+                f"%{float(roi) * 100:+.1f}" if roi is not None else "—"
+            )
+            st.info(
+                f"Eski %70 aday kuralı: X olasılığı en az "
+                f"%{float(selected_draw_rule['X olasılık eşiği']) * 100:.0f} ve "
+                f"X'in lider sonuca farkı en çok "
+                f"%{float(selected_draw_rule['X azami fark']) * 100:.0f}. "
+                f"Yeni %30'da {int(selected_draw_rule['Yeni %30 X müdahale'])} "
+                f"tahmin X'e çevrildi; X yakalama {draw_recall_text}, "
+                f"doğruluk farkı {accuracy_delta_text}, ROI {roi_text}."
+            )
+            if training_delta is not None and float(training_delta) <= 0:
+                st.warning(
+                    "Aday kural eski %70 bölümünde genel MS doğruluğunu artırmadı; "
+                    "canlı tahminlere uygulanmamalı."
+                )
+            elif accuracy_delta is not None and float(accuracy_delta) <= 0:
+                st.warning(
+                    "Aday kural eğitim bölümünde umut verici olsa da yeni %30 bölümünde "
+                    "genel MS doğruluğunu artırmadı; canlıya alınmamalı."
+                )
+            elif accuracy_delta is not None:
+                st.success(
+                    "Aday kural yeni %30 bölümünde de doğruluğu artırdı. Bu yalnızca "
+                    "doğrulama sinyalidir; canlı kullanım ayrı karar gerektirir."
+                )
+
+            comparison_rows = pd.DataFrame(
+                [
+                    {
+                        "Kural": "Mevcut model",
+                        "Doğruluk": draw_baseline.get("Yeni %30 doğruluk"),
+                        "X yakalama": draw_baseline.get("Yeni %30 X yakalama"),
+                        "X kesinlik": draw_baseline.get("Yeni %30 X kesinlik"),
+                        "X tahmini": draw_baseline.get("Yeni %30 X tahmini"),
+                        "ROI": draw_baseline.get("Yeni %30 ROI"),
+                    },
+                    {
+                        "Kural": "X adayı",
+                        "Doğruluk": selected_draw_rule.get("Yeni %30 doğruluk"),
+                        "X yakalama": selected_draw_rule.get("Yeni %30 X yakalama"),
+                        "X kesinlik": selected_draw_rule.get("Yeni %30 X kesinlik"),
+                        "X tahmini": selected_draw_rule.get("Yeni %30 X tahmini"),
+                        "ROI": selected_draw_rule.get("Yeni %30 ROI"),
+                    },
+                ]
+            )
+            for column in ("Doğruluk", "X yakalama", "X kesinlik", "ROI"):
+                comparison_rows[column] = comparison_rows[column].map(
+                    lambda value: (
+                        "—"
+                        if value is None or pd.isna(value)
+                        else f"%{float(value) * 100:+.1f}"
+                        if column == "ROI"
+                        else f"%{float(value) * 100:.1f}"
+                    )
+                )
+            st.dataframe(comparison_rows, use_container_width=True, hide_index=True)
+        else:
+            st.warning(
+                "Eski %70 bölümünde asgari örneklem şartını sağlayan bir beraberlik "
+                "kuralı bulunamadı. Canlı tahmin davranışı değiştirilmemeli."
+            )
+
+        draw_rows["Aday"] = draw_rows["selected"].map(
+            lambda value: "✓" if value else ""
+        )
+        draw_rows = draw_rows.drop(columns=["selected"])
+        draw_percent_columns = (
+            "X olasılık eşiği",
+            "X azami fark",
+            "Eğitim doğruluk",
+            "Eğitim doğruluk farkı",
+            "Yeni %30 doğruluk",
+            "Yeni %30 doğruluk farkı",
+            "Yeni %30 X yakalama",
+            "Yeni %30 X kesinlik",
+            "Yeni %30 ROI",
+        )
+        for column in draw_percent_columns:
+            draw_rows[column] = draw_rows[column].map(
+                lambda value: (
+                    "—"
+                    if value is None or pd.isna(value)
+                    else f"%{float(value) * 100:+.1f}"
+                    if column.endswith("farkı") or column.endswith("ROI")
+                    else f"%{float(value) * 100:.1f}"
+                )
+            )
+        draw_rows = draw_rows[
+            ["Aday", *[column for column in draw_rows.columns if column != "Aday"]]
+        ]
+        with st.expander("Tüm beraberlik karar kurallarını göster"):
+            st.dataframe(draw_rows, use_container_width=True, hide_index=True)
+
     value_frame = pd.DataFrame(result.get("value_metrics") or [])
     if not value_frame.empty:
         value_frame = value_frame.drop(columns=["Eşik"], errors="ignore")
