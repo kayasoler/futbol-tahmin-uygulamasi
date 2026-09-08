@@ -1,6 +1,10 @@
 import unittest
 
-from backtest import ms_confusion_rows, ms_threshold_diagnostics
+from backtest import (
+    ms_confusion_rows,
+    ms_draw_rule_diagnostics,
+    ms_threshold_diagnostics,
+)
 
 
 def diagnostic_record(
@@ -112,6 +116,39 @@ class BacktestDiagnosticsTests(unittest.TestCase):
 
         self.assertEqual(result["training_count"], 5)
         self.assertEqual(result["holdout_count"], 1)
+
+    def test_draw_rule_is_selected_on_training_and_compared_on_holdout(self):
+        records = []
+        for index in range(20):
+            is_close_draw = index < 5 or index in {14, 15}
+            records.append(
+                {
+                    "date": f"2026-01-{index + 1:02d}",
+                    "division": "E0",
+                    "predicted": "1",
+                    "actual": "X" if is_close_draw else "1",
+                    "probabilities": (
+                        {"1": 0.36, "X": 0.34, "2": 0.30}
+                        if is_close_draw
+                        else {"1": 0.60, "X": 0.25, "2": 0.15}
+                    ),
+                    "odds_by_result": {"1": 1.80, "X": 3.20, "2": 4.00},
+                }
+            )
+
+        result = ms_draw_rule_diagnostics(
+            records,
+            train_ratio=0.70,
+            minimum_training_overrides=4,
+        )
+        selected = result["selected"]
+
+        self.assertIsNotNone(selected)
+        self.assertAlmostEqual(result["baseline"]["Yeni %30 doğruluk"], 4 / 6)
+        self.assertAlmostEqual(selected["Yeni %30 doğruluk"], 1.0)
+        self.assertAlmostEqual(selected["Yeni %30 doğruluk farkı"], 2 / 6)
+        self.assertAlmostEqual(selected["Yeni %30 X yakalama"], 1.0)
+        self.assertEqual(selected["Yeni %30 X müdahale"], 2)
 
 
 if __name__ == "__main__":
