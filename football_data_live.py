@@ -83,6 +83,7 @@ def parse_uploaded_fixtures(
 def fetch_current_fixtures(
     *, attempts: int = 3, retry_delay: float = 1.0,
     urls: tuple[str, ...] = FIXTURES_URLS,
+    now: datetime | None = None,
 ) -> list[dict[str, Any]]:
     """Fetch fixtures from the working hostname, then try the legacy hostname."""
     if attempts < 1:
@@ -95,7 +96,7 @@ def fetch_current_fixtures(
             request = Request(url, headers={"User-Agent": "Mozilla/5.0"})
             try:
                 with urlopen(request, timeout=35) as response:
-                    return parse_fixtures_csv(response.read())
+                    return parse_fixtures_csv(response.read(), now=now)
             except HTTPError as exc:
                 last_error = RuntimeError(f"Football-Data HTTP {exc.code}")
             except (URLError, TimeoutError) as exc:
