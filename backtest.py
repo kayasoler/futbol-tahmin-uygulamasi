@@ -17,6 +17,7 @@ MS_PROBABILITY_THRESHOLDS = (0.45, 0.50, 0.55, 0.60, 0.62, 0.65, 0.70)
 MS_MARGIN_THRESHOLDS = (0.00, 0.08, 0.12, 0.18, 0.20)
 DRAW_PROBABILITY_THRESHOLDS = (0.18, 0.20, 0.22, 0.24, 0.26, 0.28, 0.30)
 DRAW_MAX_DEFICITS = (0.02, 0.04, 0.06, 0.08, 0.10, 0.12, 0.15)
+DIXON_COLES_RHO_CANDIDATES = tuple(value / 100 for value in range(-15, 5))
 
 
 def _number(value: Any) -> float | None:
@@ -440,6 +441,362 @@ def ms_draw_rule_diagnostics(
     }
 
 
+def _dixon_coles_tau(
+    home_goals: int,
+    away_goals: int,
+    expected_home: float,
+    expected_away: float,
+    rho: float,
+) -> float:
+    if home_goals == 0 and away_goals == 0:
+        return 1 - expected_home * expected_away * rho
+    if home_goals == 0 and away_goals == 1:
+        return 1 + expected_home * rho
+    if home_goals == 1 and away_goals == 0:
+        return 1 + expected_away * rho
+    if home_goals == 1 and away_goals == 1:
+        return 1 - rho
+    return 1.0
+
+
+def _dixon_coles_ms_probabilities(
+    expected_home: float,
+    expected_away: float,
+    rho: float,
+) -> dict[str, float] | None:
+    score_grid: dict[tuple[int, int], float] = {}
+    for home_goals in range(9):
+        for away_goals in range(9):
+            tau = _dixon_coles_tau(
+                home_goals,
+                away_goals,
+                expected_home,
+                expected_away,
+                rho,
+            )
+            if tau <= 0:
+                return None
+            probability = (
+                math.exp(-expected_home)
+                * expected_home**home_goals
+                / math.factorial(home_goals)
+                * math.exp(-expected_away)
+                * expected_away**away_goals
+                / math.factorial(away_goals)
+                * tau
+            )
+            score_grid[(home_goals, away_goals)] = probability
+
+    total = sum(score_grid.values())
+    if total <= 0:
+        return None
+    result_probabilities = {"1": 0.0, "X": 0.0, "2": 0.0}
+    for (home_goals, away_goals), probability in score_grid.items():
+        result = "1" if home_goals > away_goals else "2" if away_goals > home_goals else "X"
+        result_probabilities[result] += probability / total
+    return result_probabilities
+
+
+def _normalized_probabilities(values: Any) -> dict[str, float] | None:
+    if not isinstance(values, dict):
+        return None
+    parsed = {label: _number(values.get(label)) for label in RESULT_ODDS_COLUMNS}
+    if any(value is None or float(value) < 0 for value in parsed.values()):
+        return None
+    total = sum(float(value) for value in parsed.values())
+    if total <= 0:
+        return None
+    return {label: float(value) / total for label, value in parsed.items()}
+
+
+def _dixon_coles_candidate_probabilities(
+    record: dict[str, Any], rho: float
+) -> dict[str, float] | None:
+    current = _normalized_probabilities(record.get("current_probabilities"))
+    components = record.get("components") or {}
+    poisson = next(
+        (
+            component
+            for name, component in components.items()
+            if str(name).startswith("Poisson") and isinstance(component, dict)
+        ),
+        None,
+    )
+    if current is None or poisson is None:
+        return None
+    poisson_current = _normalized_probabilities(poisson.get("probabilities"))
+    poisson_weight = _number(poisson.get("weight"))
+    expected_home = _number(record.get("expected_home_goals"))
+    expected_away = _number(record.get("expected_away_goals"))
+    if (
+        poisson_current is None
+        or poisson_weight is None
+        or not 0 < poisson_weight <= 1
+        or expected_home is None
+        or expected_away is None
+        or expected_home <= 0
+        or expected_away <= 0
+    ):
+        return None
+    corrected = _dixon_coles_ms_probabilities(expected_home, expected_away, rho)
+    if corrected is None:
+        return None
+    candidate = {
+        label: max(
+            1e-9,
+            current[label]
+            + poisson_weight * (corrected[label] - poisson_current[label]),
+        )
+        for label in RESULT_ODDS_COLUMNS
+    }
+    return _normalized_probabilities(candidate)
+
+
+def _fit_dixon_coles_rho(
+    records: list[dict[str, Any]],
+) -> tuple[float, int, int]:
+    usable: list[tuple[int, int, float, float]] = []
+    for record in records:
+        home_goals = _number(record.get("actual_home_goals"))
+        away_goals = _number(record.get("actual_away_goals"))
+        expected_home = _number(record.get("expected_home_goals"))
+        expected_away = _number(record.get("expected_away_goals"))
+        if None in (home_goals, away_goals, expected_home, expected_away):
+            continue
+        usable.append(
+            (
+                int(float(home_goals)),
+                int(float(away_goals)),
+                float(expected_home),
+                float(expected_away),
+            )
+        )
+
+    low_score_count = sum(
+        home_goals <= 1 and away_goals <= 1
+        for home_goals, away_goals, _, _ in usable
+    )
+    best_rho = 0.0
+    best_key = (float("-inf"), float("-inf"))
+    for rho in DIXON_COLES_RHO_CANDIDATES:
+        log_likelihood = 0.0
+        valid = True
+        for home_goals, away_goals, expected_home, expected_away in usable:
+            tau = _dixon_coles_tau(
+                home_goals,
+                away_goals,
+                expected_home,
+                expected_away,
+                rho,
+            )
+            if tau <= 0:
+                valid = False
+                break
+            log_likelihood += math.log(tau)
+        if not valid:
+            continue
+        key = (log_likelihood, -abs(rho))
+        if key > best_key:
+            best_key = key
+            best_rho = rho
+    return best_rho, len(usable), low_score_count
+
+
+def _multiclass_event(
+    record: dict[str, Any], probabilities: dict[str, float]
+) -> dict[str, Any] | None:
+    actual = str(record.get("actual") or "")
+    if actual not in RESULT_ODDS_COLUMNS:
+        return None
+    predicted = max(RESULT_ODDS_COLUMNS, key=lambda label: probabilities[label])
+    correct = predicted == actual
+    brier = sum(
+        (probabilities[label] - (1.0 if label == actual else 0.0)) ** 2
+        for label in RESULT_ODDS_COLUMNS
+    ) / 3
+    log_loss = -math.log(max(probabilities[actual], 1e-12))
+    odds = _number((record.get("odds") or {}).get(predicted))
+    profit = None
+    if odds is not None and odds > 1:
+        profit = odds - 1 if correct else -1.0
+    return {
+        "actual": actual,
+        "predicted": predicted,
+        "correct": correct,
+        "brier": brier,
+        "log_loss": log_loss,
+        "profit": profit,
+    }
+
+
+def _summarize_multiclass_events(events: list[dict[str, Any]]) -> dict[str, Any]:
+    total = len(events)
+    draw_predictions = sum(event["predicted"] == "X" for event in events)
+    actual_draws = sum(event["actual"] == "X" for event in events)
+    draw_correct = sum(
+        event["predicted"] == "X" and event["actual"] == "X"
+        for event in events
+    )
+    priced = [event for event in events if event["profit"] is not None]
+    return {
+        "matches": total,
+        "accuracy": (
+            sum(bool(event["correct"]) for event in events) / total
+            if total
+            else None
+        ),
+        "brier": (
+            sum(float(event["brier"]) for event in events) / total
+            if total
+            else None
+        ),
+        "log_loss": (
+            sum(float(event["log_loss"]) for event in events) / total
+            if total
+            else None
+        ),
+        "draw_recall": draw_correct / actual_draws if actual_draws else None,
+        "draw_precision": draw_correct / draw_predictions if draw_predictions else None,
+        "draw_predictions": draw_predictions,
+        "priced_bets": len(priced),
+        "roi": (
+            sum(float(event["profit"]) for event in priced) / len(priced)
+            if priced
+            else None
+        ),
+    }
+
+
+def dixon_coles_diagnostics(
+    records: list[dict[str, Any]],
+    *,
+    train_ratio: float = 0.70,
+    minimum_low_score_matches: int = 10,
+) -> dict[str, Any]:
+    """Fit league-level rho on old scores and compare paired MS forecasts on new scores."""
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for record in records:
+        grouped[str(record.get("division") or "Bilinmeyen")].append(record)
+
+    all_current_events: list[dict[str, Any]] = []
+    all_candidate_events: list[dict[str, Any]] = []
+    league_rows: list[dict[str, Any]] = []
+    for division, division_records in sorted(grouped.items()):
+        training, holdout = _temporal_train_holdout(division_records, train_ratio)
+        rho, fitted_matches, low_score_matches = _fit_dixon_coles_rho(training)
+        if low_score_matches < minimum_low_score_matches:
+            league_rows.append(
+                {
+                    "Lig": division,
+                    "Rho": None,
+                    "Eğitim maçı": fitted_matches,
+                    "Eğitim düşük skor": low_score_matches,
+                    "Yeni %30 maç": 0,
+                    "Mevcut doğruluk": None,
+                    "DC doğruluk": None,
+                    "Doğruluk farkı": None,
+                    "Brier farkı": None,
+                    "Log-loss farkı": None,
+                    "ROI farkı": None,
+                    "Durum": "Yetersiz düşük skor örneği",
+                }
+            )
+            continue
+
+        current_events: list[dict[str, Any]] = []
+        candidate_events: list[dict[str, Any]] = []
+        for record in holdout:
+            current_probabilities = _normalized_probabilities(
+                record.get("current_probabilities")
+            )
+            candidate_probabilities = _dixon_coles_candidate_probabilities(
+                record, rho
+            )
+            if current_probabilities is None or candidate_probabilities is None:
+                continue
+            current_event = _multiclass_event(record, current_probabilities)
+            candidate_event = _multiclass_event(record, candidate_probabilities)
+            if current_event is None or candidate_event is None:
+                continue
+            current_events.append(current_event)
+            candidate_events.append(candidate_event)
+
+        current = _summarize_multiclass_events(current_events)
+        candidate = _summarize_multiclass_events(candidate_events)
+        all_current_events.extend(current_events)
+        all_candidate_events.extend(candidate_events)
+
+        def difference(key: str) -> float | None:
+            current_value = current.get(key)
+            candidate_value = candidate.get(key)
+            if current_value is None or candidate_value is None:
+                return None
+            return float(candidate_value) - float(current_value)
+
+        league_rows.append(
+            {
+                "Lig": division,
+                "Rho": rho,
+                "Eğitim maçı": fitted_matches,
+                "Eğitim düşük skor": low_score_matches,
+                "Yeni %30 maç": candidate["matches"],
+                "Mevcut doğruluk": current["accuracy"],
+                "DC doğruluk": candidate["accuracy"],
+                "Doğruluk farkı": difference("accuracy"),
+                "Brier farkı": difference("brier"),
+                "Log-loss farkı": difference("log_loss"),
+                "ROI farkı": difference("roi"),
+                "Durum": "Test edildi" if candidate["matches"] else "Eşleşen kayıt yok",
+            }
+        )
+
+    current = _summarize_multiclass_events(all_current_events)
+    candidate = _summarize_multiclass_events(all_candidate_events)
+    tested_leagues = sum(row["Durum"] == "Test edildi" for row in league_rows)
+    improved_leagues = sum(
+        row["Durum"] == "Test edildi"
+        and row["Doğruluk farkı"] is not None
+        and float(row["Doğruluk farkı"]) > 0
+        for row in league_rows
+    )
+
+    def combined_difference(key: str) -> float | None:
+        current_value = current.get(key)
+        candidate_value = candidate.get(key)
+        if current_value is None or candidate_value is None:
+            return None
+        return float(candidate_value) - float(current_value)
+
+    return {
+        "current": current,
+        "candidate": candidate,
+        "differences": {
+            "accuracy": combined_difference("accuracy"),
+            "brier": combined_difference("brier"),
+            "log_loss": combined_difference("log_loss"),
+            "roi": combined_difference("roi"),
+        },
+        "league_rows": league_rows,
+        "tested_leagues": tested_leagues,
+        "improved_leagues": improved_leagues,
+        "passes": bool(
+            candidate["matches"]
+            and combined_difference("accuracy") is not None
+            and combined_difference("accuracy") > 0
+            and combined_difference("brier") is not None
+            and combined_difference("brier") < 0
+            and combined_difference("log_loss") is not None
+            and combined_difference("log_loss") < 0
+            and (
+                combined_difference("roi") is None
+                or combined_difference("roi") >= 0
+            )
+            and tested_leagues > 0
+            and improved_leagues >= math.ceil(tested_leagues / 2)
+        ),
+    }
+
+
 def _model_match(row: dict[str, Any]) -> dict[str, Any]:
     """Remove the answer fields before asking the model for a prediction."""
     hidden = {
@@ -676,6 +1033,14 @@ def run_backtest(
                 "date": str(target.get("match_date") or ""),
                 "division": str(target.get("division") or ""),
                 "actual": actual_ms,
+                "actual_home_goals": home_goals,
+                "actual_away_goals": away_goals,
+                "expected_home_goals": _number(
+                    predictions.get("expected_home_goals")
+                ),
+                "expected_away_goals": _number(
+                    predictions.get("expected_away_goals")
+                ),
                 "odds": {
                     result: _number(target.get(column))
                     for result, column in RESULT_ODDS_COLUMNS.items()
@@ -689,6 +1054,7 @@ def run_backtest(
                         "probabilities": {
                             result: float(component[result]) for result in ("1", "X", "2")
                         },
+                        "weight": float(component.get("Ağırlık") or 0),
                         "sample": int(component.get("Örneklem") or 0),
                     }
                     for component in report.get("components") or []
@@ -825,6 +1191,7 @@ def run_backtest(
         "ms_confusion": ms_confusion_rows(ms_diagnostics),
         "ms_threshold_diagnostics": ms_threshold_diagnostics(ms_diagnostics),
         "ms_draw_rule_diagnostics": ms_draw_rule_diagnostics(ms_diagnostics),
+        "dixon_coles_diagnostics": dixon_coles_diagnostics(calibration_records),
         "calibration_records": calibration_records,
         "details": list(reversed(details)),
         "note": (
@@ -850,9 +1217,11 @@ def aggregate_backtests(
     combined_value = {threshold: _empty_bet_group() for threshold in VALUE_THRESHOLDS}
     league_summary: list[dict[str, Any]] = []
     combined_ms_diagnostics: list[dict[str, Any]] = []
+    combined_calibration_records: list[dict[str, Any]] = []
 
     for division, result in league_results:
         combined_ms_diagnostics.extend(result.get("ms_diagnostics") or [])
+        combined_calibration_records.extend(result.get("calibration_records") or [])
         for row in result.get("metrics") or []:
             item = combined_metrics[str(row["Ölçüm"])]
             item["correct"] += float(row["Doğru"])
@@ -998,6 +1367,9 @@ def aggregate_backtests(
         ),
         "ms_draw_rule_diagnostics": ms_draw_rule_diagnostics(
             combined_ms_diagnostics
+        ),
+        "dixon_coles_diagnostics": dixon_coles_diagnostics(
+            combined_calibration_records
         ),
         "league_summary": league_summary,
         "calibration_leagues": [
