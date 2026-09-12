@@ -2927,6 +2927,198 @@ def render_backtest_page(client: Client) -> None:
             with st.expander("2.5 Alt/Üst lig ayrıntılarını göster"):
                 st.dataframe(totals_leagues, use_container_width=True, hide_index=True)
 
+    shadow_diagnostics = (
+        result.get("totals_25_market_independent_diagnostics") or {}
+    )
+    shadow_selected = shadow_diagnostics.get("selected")
+    shadow_rows = pd.DataFrame(shadow_diagnostics.get("rows") or [])
+    shadow_leagues = pd.DataFrame(shadow_diagnostics.get("league_rows") or [])
+    if int(shadow_diagnostics.get("holdout_count") or 0) > 0:
+        st.markdown("#### Orandan bağımsız 2.5 Alt/Üst gölge A/B testi")
+        st.caption(
+            "Gölge model doğrudan Bet365 olasılığını ve mevcut orana göre seçilen "
+            "aynı-oran geçmişlerini kullanmaz; yalnızca takım/lig formu, Poisson ve "
+            "H2H ile hesaplanır. Mevcut canlı model değişmez."
+        )
+
+        def format_shadow_comparison(rows: list[dict[str, object]]) -> pd.DataFrame:
+            frame = pd.DataFrame(rows)
+            for column in ("Doğruluk", "ROI"):
+                frame[column] = frame[column].map(
+                    lambda value: (
+                        "—"
+                        if value is None or pd.isna(value)
+                        else f"%{float(value) * 100:+.1f}"
+                        if column == "ROI"
+                        else f"%{float(value) * 100:.1f}"
+                    )
+                )
+            for column in ("Brier", "Log-loss"):
+                frame[column] = frame[column].map(
+                    lambda value: (
+                        "—" if value is None or pd.isna(value) else f"{float(value):.4f}"
+                    )
+                )
+            return frame
+
+        all_comparison = format_shadow_comparison(
+            [
+                {
+                    "Yöntem": label,
+                    "Maç": values.get("matches"),
+                    "Doğruluk": values.get("accuracy"),
+                    "Brier": values.get("brier"),
+                    "Log-loss": values.get("log_loss"),
+                    "Oranlı seçim": values.get("priced_bets"),
+                    "ROI": values.get("roi"),
+                }
+                for label, values in (
+                    (
+                        "Mevcut harmanlanmış model",
+                        shadow_diagnostics.get("all_current") or {},
+                    ),
+                    (
+                        "Orandan bağımsız gölge model",
+                        shadow_diagnostics.get("all_shadow") or {},
+                    ),
+                    (
+                        "Bet365 piyasa favorisi",
+                        shadow_diagnostics.get("all_market") or {},
+                    ),
+                )
+            ]
+        )
+        st.markdown("##### Yeni %30 · tüm maçlar")
+        st.caption("Brier ve log-loss değerlerinde daha düşük sonuç daha iyidir.")
+        st.dataframe(all_comparison, use_container_width=True, hide_index=True)
+
+        if isinstance(shadow_selected, dict):
+            shadow_value_threshold = float(shadow_selected["Değer eşiği"])
+            shadow_value_text = (
+                "değer şartı yok"
+                if shadow_value_threshold < 0
+                else f"en az %{shadow_value_threshold * 100:.0f} bağımsız değer farkı"
+            )
+            st.info(
+                f"Eski %70'te seçilen gölge kural: en az "
+                f"%{float(shadow_selected['Olasılık eşiği']) * 100:.0f} olasılık ve "
+                f"{shadow_value_text}. Yeni %30'da "
+                f"{int((shadow_diagnostics.get('candidate_shadow') or {}).get('matches') or 0)} "
+                "maç seçildi."
+            )
+            candidate_comparison = format_shadow_comparison(
+                [
+                    {
+                        "Yöntem": label,
+                        "Maç": values.get("matches"),
+                        "Doğruluk": values.get("accuracy"),
+                        "Brier": values.get("brier"),
+                        "Log-loss": values.get("log_loss"),
+                        "Oranlı seçim": values.get("priced_bets"),
+                        "ROI": values.get("roi"),
+                    }
+                    for label, values in (
+                        (
+                            "Mevcut model · aynı maçlar",
+                            shadow_diagnostics.get("candidate_current") or {},
+                        ),
+                        (
+                            "Gölge model · eşikli",
+                            shadow_diagnostics.get("candidate_shadow") or {},
+                        ),
+                        (
+                            "Piyasa favorisi · aynı maçlar",
+                            shadow_diagnostics.get("candidate_market") or {},
+                        ),
+                    )
+                ]
+            )
+            st.markdown("##### Yeni %30 · gölge kuralın seçtiği aynı maçlar")
+            st.dataframe(
+                candidate_comparison,
+                use_container_width=True,
+                hide_index=True,
+            )
+            if shadow_diagnostics.get("passes"):
+                st.success(
+                    "Orandan bağımsız gölge model yeni %30 bölümünde mevcut modeli "
+                    "ve piyasayı doğruluk ile ROI'de geçti; tüm maçlarda Brier ve "
+                    "log-loss değerlerini de iyileştirdi. Canlı kullanım için güçlü "
+                    "adaydır, otomatik uygulanmamıştır."
+                )
+            else:
+                st.warning(
+                    "Orandan bağımsız gölge model örneklem, doğruluk, ROI, olasılık "
+                    "kalitesi ve lig tutarlılığı şartlarının tamamını sağlamadı. "
+                    "Canlı modele uygulanmamalı."
+                )
+        else:
+            st.warning(
+                "Eski %70 bölümünde asgari oranlı örneklemi sağlayan bağımsız bir "
+                "2.5 Alt/Üst kuralı bulunamadı."
+            )
+
+        if not shadow_rows.empty:
+            shadow_rows["Aday"] = shadow_rows["selected"].map(
+                lambda value: "✓" if value else ""
+            )
+            shadow_rows = shadow_rows.drop(columns=["selected"])
+            shadow_rows["Değer eşiği"] = shadow_rows["Değer eşiği"].map(
+                lambda value: (
+                    "Yok" if float(value) < 0 else f"%{float(value) * 100:.0f}"
+                )
+            )
+            for column in (
+                "Olasılık eşiği",
+                "Eğitim doğruluk",
+                "Eğitim ROI",
+                "Eğitim ROI alt sınırı",
+                "Yeni %30 kapsama",
+                "Yeni %30 doğruluk",
+                "Yeni %30 ROI",
+            ):
+                shadow_rows[column] = shadow_rows[column].map(
+                    lambda value: (
+                        "—"
+                        if value is None or pd.isna(value)
+                        else f"%{float(value) * 100:+.1f}"
+                        if "ROI" in column
+                        else f"%{float(value) * 100:.1f}"
+                    )
+                )
+            for column in ("Yeni %30 Brier", "Yeni %30 log-loss"):
+                shadow_rows[column] = shadow_rows[column].map(
+                    lambda value: (
+                        "—" if value is None or pd.isna(value) else f"{float(value):.4f}"
+                    )
+                )
+            shadow_rows = shadow_rows[
+                ["Aday", *[column for column in shadow_rows.columns if column != "Aday"]]
+            ]
+            with st.expander("Tüm bağımsız 2.5 Alt/Üst eşiklerini göster"):
+                st.dataframe(shadow_rows, use_container_width=True, hide_index=True)
+
+        if not shadow_leagues.empty:
+            for column in (
+                "Gölge doğruluk",
+                "Mevcut doğruluk",
+                "Piyasa doğruluk",
+                "Gölge ROI",
+                "Mevcut ROI",
+                "Piyasa ROI",
+            ):
+                shadow_leagues[column] = shadow_leagues[column].map(
+                    lambda value: (
+                        "—"
+                        if value is None or pd.isna(value)
+                        else f"%{float(value) * 100:+.1f}"
+                        if "ROI" in column
+                        else f"%{float(value) * 100:.1f}"
+                    )
+                )
+            with st.expander("Orandan bağımsız 2.5 Alt/Üst lig ayrıntıları"):
+                st.dataframe(shadow_leagues, use_container_width=True, hide_index=True)
+
     value_frame = pd.DataFrame(result.get("value_metrics") or [])
     if not value_frame.empty:
         value_frame = value_frame.drop(columns=["Eşik"], errors="ignore")
