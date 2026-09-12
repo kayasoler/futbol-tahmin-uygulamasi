@@ -6,6 +6,7 @@ from backtest import (
     ms_confusion_rows,
     ms_draw_rule_diagnostics,
     ms_threshold_diagnostics,
+    totals_25_threshold_diagnostics,
 )
 
 
@@ -200,6 +201,71 @@ class BacktestDiagnosticsTests(unittest.TestCase):
         self.assertLess(result["differences"]["brier"], 0)
         self.assertLess(result["differences"]["log_loss"], 0)
         self.assertTrue(result["passes"])
+
+    def test_totals_25_threshold_is_selected_only_on_old_matches(self):
+        records = []
+        for index in range(20):
+            high_confidence = index < 6 or 14 <= index < 17
+            if index < 14:
+                correct = high_confidence or index % 2 == 0
+            else:
+                correct = index in {14, 15, 17}
+            records.append(
+                {
+                    "date": f"2026-01-{index + 1:02d}",
+                    "division": "E0",
+                    "predicted": "Üst",
+                    "actual": "Üst" if correct else "Alt",
+                    "over_probability": 0.70 if high_confidence else 0.52,
+                    "odds": {"Üst": 1.80, "Alt": 2.10},
+                }
+            )
+
+        result = totals_25_threshold_diagnostics(
+            records,
+            train_ratio=0.70,
+            minimum_training_priced_bets=4,
+        )
+
+        self.assertEqual(result["training_count"], 14)
+        self.assertEqual(result["holdout_count"], 6)
+        self.assertIsNotNone(result["selected"])
+        self.assertEqual(result["selected"]["Eğitim seçimi"], 6)
+        self.assertEqual(result["candidate"]["matches"], 3)
+        self.assertAlmostEqual(result["candidate"]["accuracy"], 2 / 3)
+        self.assertAlmostEqual(result["candidate"]["coverage"], 0.5)
+        self.assertAlmostEqual(result["candidate"]["roi"], 0.2)
+        self.assertEqual(result["market"]["matches"], 3)
+
+    def test_totals_25_uses_probability_of_selected_under_side(self):
+        records = [
+            {
+                "date": f"2026-01-{index + 1:02d}",
+                "division": "E0",
+                "predicted": "Alt",
+                "actual": "Alt",
+                "over_probability": 0.30,
+                "odds": {"Üst": 2.20, "Alt": 1.80},
+            }
+            for index in range(10)
+        ]
+
+        result = totals_25_threshold_diagnostics(
+            records,
+            train_ratio=0.70,
+            minimum_training_priced_bets=1,
+        )
+
+        self.assertIsNotNone(result["selected"])
+        under_probability_row = next(
+            row
+            for row in result["rows"]
+            if row["Olasılık eşiği"] == 0.68 and row["Değer eşiği"] == -1.0
+        )
+        self.assertEqual(under_probability_row["Eğitim seçimi"], 7)
+        self.assertEqual(under_probability_row["Yeni %30 seçim"], 3)
+        self.assertEqual(result["candidate"]["matches"], 3)
+        self.assertEqual(result["candidate"]["accuracy"], 1.0)
 
 
 if __name__ == "__main__":
