@@ -1,6 +1,8 @@
 import unittest
 
 from backtest import (
+    _dixon_coles_ms_probabilities,
+    dixon_coles_diagnostics,
     ms_confusion_rows,
     ms_draw_rule_diagnostics,
     ms_threshold_diagnostics,
@@ -149,6 +151,55 @@ class BacktestDiagnosticsTests(unittest.TestCase):
         self.assertAlmostEqual(selected["Yeni %30 doğruluk farkı"], 2 / 6)
         self.assertAlmostEqual(selected["Yeni %30 X yakalama"], 1.0)
         self.assertEqual(selected["Yeni %30 X müdahale"], 2)
+
+    def test_negative_dixon_coles_rho_increases_draw_probability(self):
+        independent = _dixon_coles_ms_probabilities(1.0, 1.0, 0.0)
+        corrected = _dixon_coles_ms_probabilities(1.0, 1.0, -0.10)
+
+        self.assertIsNotNone(independent)
+        self.assertIsNotNone(corrected)
+        self.assertGreater(corrected["X"], independent["X"])
+        self.assertAlmostEqual(sum(corrected.values()), 1.0)
+
+    def test_dixon_coles_candidate_is_fitted_only_on_old_matches(self):
+        independent = _dixon_coles_ms_probabilities(1.0, 1.0, 0.0)
+        records = []
+        for index in range(20):
+            home_goals = index % 2
+            away_goals = home_goals
+            records.append(
+                {
+                    "date": f"2026-01-{index + 1:02d}",
+                    "division": "E0",
+                    "actual": "X",
+                    "actual_home_goals": home_goals,
+                    "actual_away_goals": away_goals,
+                    "expected_home_goals": 1.0,
+                    "expected_away_goals": 1.0,
+                    "current_probabilities": independent,
+                    "odds": {"1": 2.80, "X": 3.20, "2": 2.80},
+                    "components": {
+                        "Poisson + son saha formu": {
+                            "probabilities": independent,
+                            "weight": 1.0,
+                            "sample": 10,
+                        }
+                    },
+                }
+            )
+
+        result = dixon_coles_diagnostics(
+            records,
+            train_ratio=0.70,
+            minimum_low_score_matches=5,
+        )
+
+        self.assertEqual(result["candidate"]["matches"], 6)
+        self.assertLess(result["league_rows"][0]["Rho"], 0)
+        self.assertGreater(result["differences"]["accuracy"], 0)
+        self.assertLess(result["differences"]["brier"], 0)
+        self.assertLess(result["differences"]["log_loss"], 0)
+        self.assertTrue(result["passes"])
 
 
 if __name__ == "__main__":

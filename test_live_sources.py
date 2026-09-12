@@ -58,7 +58,11 @@ class LiveSourceTests(unittest.TestCase):
         )
         urlopen.side_effect = [URLError("temporary"), response]
 
-        rows = fetch_current_fixtures(attempts=3, retry_delay=0)
+        rows = fetch_current_fixtures(
+            attempts=3,
+            retry_delay=0,
+            now=datetime(2026, 9, 9, 12, 0, tzinfo=ZoneInfo("Europe/Istanbul")),
+        )
 
         self.assertEqual(len(rows), 1)
         self.assertEqual(urlopen.call_count, 2)
@@ -79,7 +83,11 @@ class LiveSourceTests(unittest.TestCase):
         )
         urlopen.side_effect = [URLError("primary offline"), response]
 
-        rows = fetch_current_fixtures(attempts=1, retry_delay=0)
+        rows = fetch_current_fixtures(
+            attempts=1,
+            retry_delay=0,
+            now=datetime(2026, 9, 9, 12, 0, tzinfo=ZoneInfo("Europe/Istanbul")),
+        )
 
         self.assertEqual(len(rows), 1)
         called_urls = [call.args[0].full_url for call in urlopen.call_args_list]

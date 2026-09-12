@@ -2633,6 +2633,135 @@ def render_backtest_page(client: Client) -> None:
         with st.expander("Tüm beraberlik karar kurallarını göster"):
             st.dataframe(draw_rows, use_container_width=True, hide_index=True)
 
+    dixon_diagnostics = result.get("dixon_coles_diagnostics") or {}
+    dixon_current = dixon_diagnostics.get("current") or {}
+    dixon_candidate = dixon_diagnostics.get("candidate") or {}
+    dixon_differences = dixon_diagnostics.get("differences") or {}
+    dixon_leagues = pd.DataFrame(dixon_diagnostics.get("league_rows") or [])
+    if int(dixon_candidate.get("matches") or 0) > 0:
+        st.markdown("#### Dixon–Coles düşük skor A/B testi")
+        st.caption(
+            "Her ligin rho değeri yalnızca eski %70 maçın gerçek skorlarından öğrenilir. "
+            "Daha yeni %30 maçta sadece Poisson bileşeni düzeltilir; piyasa, H2H ve "
+            "aynı oran bileşenleri değişmez. Bu test canlı modeli etkilemez."
+        )
+
+        comparison = pd.DataFrame(
+            [
+                {
+                    "Model": "Mevcut model",
+                    "Maç": dixon_current.get("matches"),
+                    "Doğruluk": dixon_current.get("accuracy"),
+                    "X yakalama": dixon_current.get("draw_recall"),
+                    "X kesinlik": dixon_current.get("draw_precision"),
+                    "X tahmini": dixon_current.get("draw_predictions"),
+                    "Brier": dixon_current.get("brier"),
+                    "Log-loss": dixon_current.get("log_loss"),
+                    "ROI": dixon_current.get("roi"),
+                },
+                {
+                    "Model": "Dixon–Coles adayı",
+                    "Maç": dixon_candidate.get("matches"),
+                    "Doğruluk": dixon_candidate.get("accuracy"),
+                    "X yakalama": dixon_candidate.get("draw_recall"),
+                    "X kesinlik": dixon_candidate.get("draw_precision"),
+                    "X tahmini": dixon_candidate.get("draw_predictions"),
+                    "Brier": dixon_candidate.get("brier"),
+                    "Log-loss": dixon_candidate.get("log_loss"),
+                    "ROI": dixon_candidate.get("roi"),
+                },
+            ]
+        )
+        for column in ("Doğruluk", "X yakalama", "X kesinlik", "ROI"):
+            comparison[column] = comparison[column].map(
+                lambda value: (
+                    "—"
+                    if value is None or pd.isna(value)
+                    else f"%{float(value) * 100:+.1f}"
+                    if column == "ROI"
+                    else f"%{float(value) * 100:.1f}"
+                )
+            )
+        for column in ("Brier", "Log-loss"):
+            comparison[column] = comparison[column].map(
+                lambda value: (
+                    "—" if value is None or pd.isna(value) else f"{float(value):.4f}"
+                )
+            )
+        st.dataframe(comparison, use_container_width=True, hide_index=True)
+
+        accuracy_delta = dixon_differences.get("accuracy")
+        brier_delta = dixon_differences.get("brier")
+        log_loss_delta = dixon_differences.get("log_loss")
+        roi_delta = dixon_differences.get("roi")
+        accuracy_delta_text = (
+            f"%{float(accuracy_delta) * 100:+.1f}"
+            if accuracy_delta is not None
+            else "—"
+        )
+        brier_delta_text = (
+            f"{float(brier_delta):+.4f}" if brier_delta is not None else "—"
+        )
+        log_loss_delta_text = (
+            f"{float(log_loss_delta):+.4f}"
+            if log_loss_delta is not None
+            else "—"
+        )
+        roi_delta_text = (
+            f"%{float(roi_delta) * 100:+.1f}" if roi_delta is not None else "—"
+        )
+        st.info(
+            f"Yeni %30 farkları — doğruluk: {accuracy_delta_text}, "
+            f"Brier: {brier_delta_text}, log-loss: {log_loss_delta_text}, "
+            f"ROI: {roi_delta_text}. "
+            f"Doğruluğu artan lig: {int(dixon_diagnostics.get('improved_leagues') or 0)}/"
+            f"{int(dixon_diagnostics.get('tested_leagues') or 0)}."
+        )
+        if dixon_diagnostics.get("passes"):
+            st.success(
+                "Dixon–Coles adayı bağımsız bölümde doğruluk, Brier ve log-loss "
+                "ölçülerini birlikte iyileştirdi, liglerin en az yarısında doğruluk "
+                "arttı ve varsa ROI gerilemedi. Bu sonuç "
+                "canlı kullanım için adaydır, otomatik uygulama değildir."
+            )
+        else:
+            st.warning(
+                "Dixon–Coles adayı bağımsız bölümde gerekli ölçüleri birlikte "
+                "iyileştirmedi; canlı modele uygulanmamalı."
+            )
+
+        if not dixon_leagues.empty:
+            dixon_leagues["Rho"] = dixon_leagues["Rho"].map(
+                lambda value: (
+                    "—"
+                    if value is None or pd.isna(value)
+                    else f"{float(value):+.3f}"
+                )
+            )
+            for column in (
+                "Mevcut doğruluk",
+                "DC doğruluk",
+                "Doğruluk farkı",
+                "ROI farkı",
+            ):
+                dixon_leagues[column] = dixon_leagues[column].map(
+                    lambda value: (
+                        "—"
+                        if value is None or pd.isna(value)
+                        else f"%{float(value) * 100:+.1f}"
+                        if column.endswith("farkı")
+                        else f"%{float(value) * 100:.1f}"
+                    )
+                )
+            for column in ("Brier farkı", "Log-loss farkı"):
+                dixon_leagues[column] = dixon_leagues[column].map(
+                    lambda value: (
+                        "—" if value is None or pd.isna(value) else f"{float(value):+.4f}"
+                    )
+                )
+            with st.expander("Dixon–Coles lig ayrıntılarını göster"):
+                st.dataframe(dixon_leagues, use_container_width=True, hide_index=True)
+
     value_frame = pd.DataFrame(result.get("value_metrics") or [])
     if not value_frame.empty:
         value_frame = value_frame.drop(columns=["Eşik"], errors="ignore")
