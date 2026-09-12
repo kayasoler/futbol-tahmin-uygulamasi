@@ -2762,6 +2762,171 @@ def render_backtest_page(client: Client) -> None:
             with st.expander("Dixon–Coles lig ayrıntılarını göster"):
                 st.dataframe(dixon_leagues, use_container_width=True, hide_index=True)
 
+    totals_diagnostics = result.get("totals_25_diagnostics") or {}
+    totals_selected = totals_diagnostics.get("selected")
+    totals_baseline = totals_diagnostics.get("baseline") or {}
+    totals_candidate = totals_diagnostics.get("candidate") or {}
+    totals_market = totals_diagnostics.get("market") or {}
+    totals_rows = pd.DataFrame(totals_diagnostics.get("rows") or [])
+    totals_leagues = pd.DataFrame(totals_diagnostics.get("league_rows") or [])
+    if int(totals_diagnostics.get("holdout_count") or 0) > 0:
+        st.markdown("#### 2.5 Alt/Üst güven ve değer A/B testi")
+        st.caption(
+            "Olasılık ve değer eşiği yalnızca eski %70 maçta seçilir. Seçilen tek "
+            "kural daha yeni %30 maçta modelin tüm seçimleri ve aynı maçlardaki "
+            "Bet365 favorisiyle karşılaştırılır; canlı öneriler değişmez."
+        )
+        if isinstance(totals_selected, dict):
+            value_threshold = float(totals_selected["Değer eşiği"])
+            value_text = (
+                "değer şartı yok"
+                if value_threshold < 0
+                else f"en az %{value_threshold * 100:.0f} değer farkı"
+            )
+            st.info(
+                f"Eski %70 bölümünün adayı: seçilen taraf için en az "
+                f"%{float(totals_selected['Olasılık eşiği']) * 100:.0f} olasılık ve "
+                f"{value_text}. Yeni %30'da {int(totals_candidate.get('matches') or 0)} "
+                f"seçim, %{float(totals_candidate.get('coverage') or 0) * 100:.1f} "
+                "kapsama."
+            )
+
+            totals_comparison = pd.DataFrame(
+                [
+                    {
+                        "Yöntem": "Model · tüm seçimler",
+                        "Maç": totals_baseline.get("matches"),
+                        "Kapsama": totals_baseline.get("coverage"),
+                        "Doğruluk": totals_baseline.get("accuracy"),
+                        "Oranlı seçim": totals_baseline.get("priced_bets"),
+                        "Ortalama oran": totals_baseline.get("average_odds"),
+                        "ROI": totals_baseline.get("roi"),
+                    },
+                    {
+                        "Yöntem": "Eşikli model",
+                        "Maç": totals_candidate.get("matches"),
+                        "Kapsama": totals_candidate.get("coverage"),
+                        "Doğruluk": totals_candidate.get("accuracy"),
+                        "Oranlı seçim": totals_candidate.get("priced_bets"),
+                        "Ortalama oran": totals_candidate.get("average_odds"),
+                        "ROI": totals_candidate.get("roi"),
+                    },
+                    {
+                        "Yöntem": "Aynı maçlarda piyasa favorisi",
+                        "Maç": totals_market.get("matches"),
+                        "Kapsama": totals_market.get("coverage"),
+                        "Doğruluk": totals_market.get("accuracy"),
+                        "Oranlı seçim": totals_market.get("priced_bets"),
+                        "Ortalama oran": totals_market.get("average_odds"),
+                        "ROI": totals_market.get("roi"),
+                    },
+                ]
+            )
+            for column in ("Kapsama", "Doğruluk", "ROI"):
+                totals_comparison[column] = totals_comparison[column].map(
+                    lambda value: (
+                        "—"
+                        if value is None or pd.isna(value)
+                        else f"%{float(value) * 100:+.1f}"
+                        if column == "ROI"
+                        else f"%{float(value) * 100:.1f}"
+                    )
+                )
+            totals_comparison["Ortalama oran"] = totals_comparison[
+                "Ortalama oran"
+            ].map(
+                lambda value: (
+                    "—" if value is None or pd.isna(value) else f"{float(value):.2f}"
+                )
+            )
+            st.dataframe(totals_comparison, use_container_width=True, hide_index=True)
+
+            candidate_roi = totals_candidate.get("roi")
+            candidate_accuracy = totals_candidate.get("accuracy")
+            market_roi = totals_market.get("roi")
+            if totals_diagnostics.get("passes"):
+                st.success(
+                    "Eşikli 2.5 Alt/Üst adayı bağımsız bölümde tüm seçimlerin "
+                    "doğruluğunu geçti, pozitif ROI üretti, piyasa referansını geçti "
+                    "ve liglerin en az yarısında pozitif kaldı. Canlı kullanım için "
+                    "adaydır; otomatik uygulanmamıştır."
+                )
+            else:
+                st.warning(
+                    "Aday kural bağımsız bölümde gereken doğruluk, örneklem, pozitif "
+                    "ROI, piyasa üstünlüğü ve lig tutarlılığı şartlarının tamamını "
+                    "sağlamadı; canlı önerilere uygulanmamalı. "
+                    f"Aday doğruluğu: "
+                    f"{'—' if candidate_accuracy is None else f'%{float(candidate_accuracy) * 100:.1f}'}, "
+                    f"ROI: {'—' if candidate_roi is None else f'%{float(candidate_roi) * 100:+.1f}'}, "
+                    f"piyasa ROI: {'—' if market_roi is None else f'%{float(market_roi) * 100:+.1f}'}."
+                )
+        else:
+            st.warning(
+                "Eski %70 bölümünde asgari oranlı örneklem şartını sağlayan bir "
+                "2.5 Alt/Üst kuralı bulunamadı."
+            )
+
+        if not totals_rows.empty:
+            totals_rows["Aday"] = totals_rows["selected"].map(
+                lambda value: "✓" if value else ""
+            )
+            totals_rows = totals_rows.drop(columns=["selected"])
+            totals_rows["Değer eşiği"] = totals_rows["Değer eşiği"].map(
+                lambda value: (
+                    "Yok" if float(value) < 0 else f"%{float(value) * 100:.0f}"
+                )
+            )
+            for column in (
+                "Olasılık eşiği",
+                "Eğitim doğruluk",
+                "Eğitim ROI",
+                "Eğitim ROI alt sınırı",
+                "Yeni %30 kapsama",
+                "Yeni %30 doğruluk",
+                "Yeni %30 ROI",
+            ):
+                totals_rows[column] = totals_rows[column].map(
+                    lambda value: (
+                        "—"
+                        if value is None or pd.isna(value)
+                        else f"%{float(value) * 100:+.1f}"
+                        if "ROI" in column
+                        else f"%{float(value) * 100:.1f}"
+                    )
+                )
+            totals_rows["Yeni %30 ortalama oran"] = totals_rows[
+                "Yeni %30 ortalama oran"
+            ].map(
+                lambda value: (
+                    "—" if value is None or pd.isna(value) else f"{float(value):.2f}"
+                )
+            )
+            totals_rows = totals_rows[
+                ["Aday", *[column for column in totals_rows.columns if column != "Aday"]]
+            ]
+            with st.expander("Tüm 2.5 Alt/Üst eşiklerini göster"):
+                st.dataframe(totals_rows, use_container_width=True, hide_index=True)
+
+        if not totals_leagues.empty:
+            for column in ("Doğruluk", "ROI", "Piyasa doğruluk", "Piyasa ROI"):
+                totals_leagues[column] = totals_leagues[column].map(
+                    lambda value: (
+                        "—"
+                        if value is None or pd.isna(value)
+                        else f"%{float(value) * 100:+.1f}"
+                        if "ROI" in column
+                        else f"%{float(value) * 100:.1f}"
+                    )
+                )
+            totals_leagues["Ortalama oran"] = totals_leagues["Ortalama oran"].map(
+                lambda value: (
+                    "—" if value is None or pd.isna(value) else f"{float(value):.2f}"
+                )
+            )
+            with st.expander("2.5 Alt/Üst lig ayrıntılarını göster"):
+                st.dataframe(totals_leagues, use_container_width=True, hide_index=True)
+
     value_frame = pd.DataFrame(result.get("value_metrics") or [])
     if not value_frame.empty:
         value_frame = value_frame.drop(columns=["Eşik"], errors="ignore")
