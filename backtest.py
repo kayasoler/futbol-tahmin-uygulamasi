@@ -460,14 +460,18 @@ def _totals_25_performance(
     value_threshold: float,
     *,
     market_reference: bool = False,
+    selection_prediction_field: str = "predicted",
+    selection_probability_field: str = "over_probability",
+    evaluation_prediction_field: str | None = None,
+    evaluation_probability_field: str | None = None,
 ) -> dict[str, Any]:
     selected: list[dict[str, Any]] = []
     for record in records:
-        prediction = str(record.get("predicted") or "")
+        prediction = str(record.get(selection_prediction_field) or "")
         actual = str(record.get("actual") or "")
         if prediction not in {"Üst", "Alt"} or actual not in {"Üst", "Alt"}:
             continue
-        over_probability = _number(record.get("over_probability"))
+        over_probability = _number(record.get(selection_probability_field))
         if over_probability is None or not 0 <= over_probability <= 1:
             continue
         selected_probability = (
@@ -488,8 +492,10 @@ def _totals_25_performance(
     correct = 0
     profits: list[float] = []
     odds_sum = 0.0
+    brier_sum = 0.0
+    log_loss_sum = 0.0
+    evaluated = 0
     for record in selected:
-        prediction = str(record.get("predicted") or "")
         odds_by_side = record.get("odds") or {}
         if market_reference:
             over_odds = _number(odds_by_side.get("Üst"))
@@ -501,15 +507,40 @@ def _totals_25_performance(
                 or under_odds <= 1
             ):
                 continue
+            inverse_total = (1 / over_odds) + (1 / under_odds)
+            over_probability = (1 / over_odds) / inverse_total
             prediction = "Üst" if over_odds < under_odds else "Alt"
+        else:
+            prediction = str(
+                record.get(evaluation_prediction_field or selection_prediction_field)
+                or ""
+            )
+            over_probability = _number(
+                record.get(
+                    evaluation_probability_field or selection_probability_field
+                )
+            )
+            if (
+                prediction not in {"Üst", "Alt"}
+                or over_probability is None
+                or not 0 <= over_probability <= 1
+            ):
+                continue
+        evaluated += 1
         is_correct = prediction == str(record.get("actual") or "")
         correct += int(is_correct)
+        actual_over = 1.0 if str(record.get("actual") or "") == "Üst" else 0.0
+        probability = min(1 - 1e-12, max(1e-12, float(over_probability)))
+        brier_sum += (probability - actual_over) ** 2
+        log_loss_sum -= (
+            actual_over * math.log(probability)
+            + (1 - actual_over) * math.log(1 - probability)
+        )
         odds = _number(odds_by_side.get(prediction))
         if odds is not None and odds > 1:
             odds_sum += odds
             profits.append(odds - 1 if is_correct else -1.0)
 
-    evaluated = len(selected) if not market_reference else len(profits)
     roi = sum(profits) / len(profits) if profits else None
     if len(profits) >= 2:
         mean = float(roi)
@@ -522,6 +553,8 @@ def _totals_25_performance(
         "correct": correct,
         "accuracy": correct / evaluated if evaluated else None,
         "coverage": evaluated / len(records) if records else None,
+        "brier": brier_sum / evaluated if evaluated else None,
+        "log_loss": log_loss_sum / evaluated if evaluated else None,
         "priced_bets": len(profits),
         "average_odds": odds_sum / len(profits) if profits else None,
         "roi": roi,
@@ -675,6 +708,234 @@ def totals_25_threshold_diagnostics(
         "baseline": baseline,
         "candidate": candidate,
         "market": market,
+        "league_rows": league_rows,
+        "tested_leagues": tested_leagues,
+        "positive_roi_leagues": positive_roi_leagues,
+        "passes": passes,
+    }
+
+
+def totals_25_market_independent_diagnostics(
+    records: list[dict[str, Any]],
+    *,
+    train_ratio: float = 0.70,
+    minimum_training_priced_bets: int = 30,
+) -> dict[str, Any]:
+    """Compare a market-independent totals model with the live blend and market."""
+    training, holdout = _temporal_train_holdout(records, train_ratio)
+    shadow_fields = {
+        "selection_prediction_field": "statistical_predicted",
+        "selection_probability_field": "statistical_over_probability",
+    }
+    shadow_training = _totals_25_performance(
+        training,
+        0.0,
+        -1.0,
+        **shadow_fields,
+    )
+    required = max(
+        minimum_training_priced_bets,
+        math.ceil(int(shadow_training["priced_bets"]) * 0.05),
+    )
+
+    rows: list[dict[str, Any]] = []
+    for probability_threshold in TOTALS_25_PROBABILITY_THRESHOLDS:
+        for value_threshold in TOTALS_25_VALUE_THRESHOLDS:
+            train = _totals_25_performance(
+                training,
+                probability_threshold,
+                value_threshold,
+                **shadow_fields,
+            )
+            test = _totals_25_performance(
+                holdout,
+                probability_threshold,
+                value_threshold,
+                **shadow_fields,
+            )
+            rows.append(
+                {
+                    "Olasılık eşiği": probability_threshold,
+                    "Değer eşiği": value_threshold,
+                    "Eğitim seçimi": train["matches"],
+                    "Eğitim oranlı seçim": train["priced_bets"],
+                    "Eğitim doğruluk": train["accuracy"],
+                    "Eğitim ROI": train["roi"],
+                    "Eğitim ROI alt sınırı": train["roi_lower_bound"],
+                    "Yeni %30 seçim": test["matches"],
+                    "Yeni %30 kapsama": test["coverage"],
+                    "Yeni %30 doğruluk": test["accuracy"],
+                    "Yeni %30 Brier": test["brier"],
+                    "Yeni %30 log-loss": test["log_loss"],
+                    "Yeni %30 oranlı seçim": test["priced_bets"],
+                    "Yeni %30 ROI": test["roi"],
+                    "selected": False,
+                }
+            )
+
+    eligible = [
+        row
+        for row in rows
+        if int(row["Eğitim oranlı seçim"]) >= required
+        and row["Eğitim ROI alt sınırı"] is not None
+    ]
+    selected = max(
+        eligible,
+        key=lambda row: (
+            float(row["Eğitim ROI alt sınırı"]),
+            float(row["Eğitim ROI"] or 0),
+            float(row["Eğitim doğruluk"] or 0),
+            int(row["Eğitim oranlı seçim"]),
+            -float(row["Olasılık eşiği"]),
+            -float(row["Değer eşiği"]),
+        ),
+        default=None,
+    )
+    if selected is not None:
+        selected["selected"] = True
+
+    probability_threshold = (
+        float(selected["Olasılık eşiği"]) if selected is not None else 2.0
+    )
+    value_threshold = (
+        float(selected["Değer eşiği"]) if selected is not None else 2.0
+    )
+    all_current = _totals_25_performance(holdout, 0.0, -1.0)
+    all_shadow = _totals_25_performance(
+        holdout,
+        0.0,
+        -1.0,
+        **shadow_fields,
+    )
+    all_market = _totals_25_performance(
+        holdout,
+        0.0,
+        -1.0,
+        market_reference=True,
+        **shadow_fields,
+    )
+    candidate_shadow = _totals_25_performance(
+        holdout,
+        probability_threshold,
+        value_threshold,
+        **shadow_fields,
+    )
+    candidate_current = _totals_25_performance(
+        holdout,
+        probability_threshold,
+        value_threshold,
+        evaluation_prediction_field="predicted",
+        evaluation_probability_field="over_probability",
+        **shadow_fields,
+    )
+    candidate_market = _totals_25_performance(
+        holdout,
+        probability_threshold,
+        value_threshold,
+        market_reference=True,
+        **shadow_fields,
+    )
+
+    league_rows: list[dict[str, Any]] = []
+    divisions = sorted(
+        {str(record.get("division") or "Bilinmeyen") for record in holdout}
+    )
+    for division in divisions:
+        league_records = [
+            record
+            for record in holdout
+            if str(record.get("division") or "Bilinmeyen") == division
+        ]
+        league_shadow = _totals_25_performance(
+            league_records,
+            probability_threshold,
+            value_threshold,
+            **shadow_fields,
+        )
+        if not league_shadow["matches"]:
+            continue
+        league_current = _totals_25_performance(
+            league_records,
+            probability_threshold,
+            value_threshold,
+            evaluation_prediction_field="predicted",
+            evaluation_probability_field="over_probability",
+            **shadow_fields,
+        )
+        league_market = _totals_25_performance(
+            league_records,
+            probability_threshold,
+            value_threshold,
+            market_reference=True,
+            **shadow_fields,
+        )
+        league_rows.append(
+            {
+                "Lig": division,
+                "Seçim": league_shadow["matches"],
+                "Gölge doğruluk": league_shadow["accuracy"],
+                "Mevcut doğruluk": league_current["accuracy"],
+                "Piyasa doğruluk": league_market["accuracy"],
+                "Gölge ROI": league_shadow["roi"],
+                "Mevcut ROI": league_current["roi"],
+                "Piyasa ROI": league_market["roi"],
+            }
+        )
+
+    tested_leagues = len(league_rows)
+    positive_roi_leagues = sum(
+        row["Gölge ROI"] is not None and float(row["Gölge ROI"]) > 0
+        for row in league_rows
+    )
+    required_holdout = max(
+        20,
+        math.ceil(int(all_shadow["priced_bets"]) * 0.05),
+    )
+
+    def lower(candidate: dict[str, Any], reference: dict[str, Any], key: str) -> bool:
+        candidate_value = candidate.get(key)
+        reference_value = reference.get(key)
+        return bool(
+            candidate_value is not None
+            and reference_value is not None
+            and float(candidate_value) < float(reference_value)
+        )
+
+    def greater(candidate: dict[str, Any], reference: dict[str, Any], key: str) -> bool:
+        candidate_value = candidate.get(key)
+        reference_value = reference.get(key)
+        return bool(
+            candidate_value is not None
+            and reference_value is not None
+            and float(candidate_value) > float(reference_value)
+        )
+
+    passes = bool(
+        selected is not None
+        and int(candidate_shadow["priced_bets"]) >= required_holdout
+        and greater(candidate_shadow, candidate_current, "roi")
+        and greater(candidate_shadow, candidate_market, "roi")
+        and greater(candidate_shadow, candidate_current, "accuracy")
+        and greater(candidate_shadow, candidate_market, "accuracy")
+        and lower(all_shadow, all_current, "brier")
+        and lower(all_shadow, all_current, "log_loss")
+        and tested_leagues > 0
+        and positive_roi_leagues >= math.ceil(tested_leagues / 2)
+    )
+
+    return {
+        "training_count": len(training),
+        "holdout_count": len(holdout),
+        "minimum_training_priced_bets": required,
+        "minimum_holdout_priced_bets": required_holdout,
+        "rows": rows,
+        "selected": dict(selected) if selected is not None else None,
+        "all_current": all_current,
+        "all_shadow": all_shadow,
+        "all_market": all_market,
+        "candidate_current": candidate_current,
+        "candidate_shadow": candidate_shadow,
+        "candidate_market": candidate_market,
         "league_rows": league_rows,
         "tested_leagues": tested_leagues,
         "positive_roi_leagues": positive_roi_leagues,
@@ -1253,6 +1514,12 @@ def run_backtest(
                 "predicted": str(total_25["prediction"]),
                 "actual": "Üst" if total_goals > 2.5 else "Alt",
                 "over_probability": _number(total_25.get("probability")),
+                "statistical_predicted": str(
+                    total_25.get("statistical_prediction") or ""
+                ),
+                "statistical_over_probability": _number(
+                    total_25.get("statistical_probability")
+                ),
                 "odds": {
                     "Üst": _number(target.get("b365_over_25")),
                     "Alt": _number(target.get("b365_under_25")),
@@ -1450,6 +1717,9 @@ def run_backtest(
         "ms_draw_rule_diagnostics": ms_draw_rule_diagnostics(ms_diagnostics),
         "dixon_coles_diagnostics": dixon_coles_diagnostics(calibration_records),
         "totals_25_diagnostics": totals_25_threshold_diagnostics(totals_25_records),
+        "totals_25_market_independent_diagnostics": (
+            totals_25_market_independent_diagnostics(totals_25_records)
+        ),
         "totals_25_records": totals_25_records,
         "calibration_records": calibration_records,
         "details": list(reversed(details)),
@@ -1634,6 +1904,9 @@ def aggregate_backtests(
         ),
         "totals_25_diagnostics": totals_25_threshold_diagnostics(
             combined_totals_25_records
+        ),
+        "totals_25_market_independent_diagnostics": (
+            totals_25_market_independent_diagnostics(combined_totals_25_records)
         ),
         "league_summary": league_summary,
         "calibration_leagues": [

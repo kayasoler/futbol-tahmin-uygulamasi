@@ -1409,9 +1409,13 @@ def build_report(
             reference,
             730,
         )
-        total_components: list[tuple[float | None, float]] = [
+        statistical_total_components: list[tuple[float | None, float]] = [
             (poisson_over, 0.70),
             (h2h_over, 0.10 * min(1, h2h_count / 8)),
+        ]
+        statistical_over_probability = _blend_scalar(statistical_total_components)
+        total_components: list[tuple[float | None, float]] = [
+            *statistical_total_components,
             (same_league_over, 0.08 * min(1, same_league_count / 12)),
             (other_over, 0.04 * min(1, other_odds_count / 30)),
         ]
@@ -1423,14 +1427,29 @@ def build_report(
             if over_inverse + under_inverse:
                 total_components.append((over_inverse / (over_inverse + under_inverse), 0.25))
         over_probability = _blend_scalar(total_components)
-        totals[str(threshold)] = {"probability": over_probability, "prediction": "Üst"}
+        totals[str(threshold)] = {
+            "probability": over_probability,
+            "prediction": "Üst",
+            "statistical_probability": statistical_over_probability,
+            "statistical_prediction": "Üst",
+        }
 
     previous = 1.0
+    previous_statistical = 1.0
     for threshold in ("0.5", "1.5", "2.5", "3.5"):
         probability = min(previous, float(totals[threshold]["probability"]))
+        statistical_probability = min(
+            previous_statistical,
+            float(totals[threshold]["statistical_probability"]),
+        )
         totals[threshold]["probability"] = probability
         totals[threshold]["prediction"] = "Üst" if probability >= 0.5 else "Alt"
+        totals[threshold]["statistical_probability"] = statistical_probability
+        totals[threshold]["statistical_prediction"] = (
+            "Üst" if statistical_probability >= 0.5 else "Alt"
+        )
         previous = probability
+        previous_statistical = statistical_probability
 
     poisson_btts = sum(
         probability
@@ -1463,6 +1482,16 @@ def build_report(
         total_data["prediction"] = prediction
         total_data["prediction_probability"] = (
             over_probability if prediction == "Üst" else 1 - over_probability
+        )
+        statistical_probability = float(total_data["statistical_probability"])
+        statistical_prediction = (
+            "Üst" if statistical_probability >= 0.5 else "Alt"
+        )
+        total_data["statistical_prediction"] = statistical_prediction
+        total_data["statistical_prediction_probability"] = (
+            statistical_probability
+            if statistical_prediction == "Üst"
+            else 1 - statistical_probability
         )
 
     btts_prediction = "KG Var" if btts_probability >= 0.5 else "KG Yok"

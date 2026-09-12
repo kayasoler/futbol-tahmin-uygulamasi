@@ -1,11 +1,13 @@
 import unittest
 
+from analysis import build_report
 from backtest import (
     _dixon_coles_ms_probabilities,
     dixon_coles_diagnostics,
     ms_confusion_rows,
     ms_draw_rule_diagnostics,
     ms_threshold_diagnostics,
+    totals_25_market_independent_diagnostics,
     totals_25_threshold_diagnostics,
 )
 
@@ -266,6 +268,90 @@ class BacktestDiagnosticsTests(unittest.TestCase):
         self.assertEqual(under_probability_row["Yeni %30 seçim"], 3)
         self.assertEqual(result["candidate"]["matches"], 3)
         self.assertEqual(result["candidate"]["accuracy"], 1.0)
+
+    def test_statistical_totals_probability_does_not_change_with_market_odds(self):
+        league_rows = [
+            {
+                "match_date": f"2025-01-{index + 1:02d}",
+                "division": "E0",
+                "home_team": "Home" if index % 2 == 0 else "Other",
+                "away_team": "Away" if index % 2 == 0 else "Third",
+                "full_time_home_goals": 2 if index % 3 else 1,
+                "full_time_away_goals": 1 if index % 4 else 0,
+            }
+            for index in range(20)
+        ]
+        match = {
+            "match_date": "2026-01-01",
+            "division": "E0",
+            "home_team": "Home",
+            "away_team": "Away",
+            "b365_over_25": 1.45,
+            "b365_under_25": 2.80,
+        }
+        opposite_market = {
+            **match,
+            "b365_over_25": 2.80,
+            "b365_under_25": 1.45,
+        }
+
+        first = build_report(match, [], [], league_rows)
+        second = build_report(opposite_market, [], [], league_rows)
+        first_total = first["predictions"]["totals"]["2.5"]
+        second_total = second["predictions"]["totals"]["2.5"]
+
+        self.assertAlmostEqual(
+            first_total["statistical_probability"],
+            second_total["statistical_probability"],
+        )
+        self.assertNotAlmostEqual(
+            first_total["probability"],
+            second_total["probability"],
+        )
+
+    def test_market_independent_candidate_uses_same_matches_for_comparison(self):
+        records = []
+        for index in range(20):
+            high_confidence = index < 6 or 14 <= index < 17
+            if index < 14:
+                actual = "Üst" if high_confidence or index % 2 == 0 else "Alt"
+            else:
+                actual = "Üst" if index in {14, 15, 17} else "Alt"
+            records.append(
+                {
+                    "date": f"2026-01-{index + 1:02d}",
+                    "division": "E0",
+                    "predicted": "Alt",
+                    "over_probability": 0.45,
+                    "statistical_predicted": "Üst",
+                    "statistical_over_probability": (
+                        0.70 if high_confidence else 0.52
+                    ),
+                    "actual": actual,
+                    "odds": {"Üst": 2.20, "Alt": 1.70},
+                }
+            )
+
+        result = totals_25_market_independent_diagnostics(
+            records,
+            train_ratio=0.70,
+            minimum_training_priced_bets=4,
+        )
+
+        self.assertEqual(result["training_count"], 14)
+        self.assertEqual(result["holdout_count"], 6)
+        self.assertIsNotNone(result["selected"])
+        self.assertEqual(result["candidate_shadow"]["matches"], 3)
+        self.assertEqual(result["candidate_current"]["matches"], 3)
+        self.assertEqual(result["candidate_market"]["matches"], 3)
+        self.assertGreater(
+            result["candidate_shadow"]["roi"],
+            result["candidate_current"]["roi"],
+        )
+        self.assertGreater(
+            result["candidate_shadow"]["accuracy"],
+            result["candidate_market"]["accuracy"],
+        )
 
 
 if __name__ == "__main__":
